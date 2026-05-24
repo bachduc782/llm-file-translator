@@ -200,11 +200,14 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
 
     # ── Phase 2: translate all cells together in parallel chunks ──────────────
     translated_map: dict[tuple[str, int, int], str] = {}
-    lock  = threading.Lock()
-    done  = 0
+    lock          = threading.Lock()
+    done          = 0
+    all_chunks    = list(_chunks(all_cells, TRANSLATE_CHUNK))
+    total_chunks  = len(all_chunks)
 
-    def _worker(chunk: list[tuple[str, int, int, str]]):
+    def _worker(chunk: list[tuple[str, int, int, str]], idx: int):
         nonlocal done
+        progress(f"[{idx}/{total_chunks}] Calling LLM for {len(chunk)} cells…")
         texts      = [t for _, _, _, t in chunk]
         translated = _translate_list(texts, target_language)
         with lock:
@@ -212,18 +215,18 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
                 if orig != new:
                     translated_map[(sn, r, c)] = new
             done += len(chunk)
-            progress(f"Translated {done}/{len(all_cells)} cells")
+            progress(f"[{idx}/{total_chunks}] Done — {done}/{len(all_cells)} cells translated")
 
     with ThreadPoolExecutor(max_workers=SHEET_WORKERS) as pool:
-        futures = [
-            pool.submit(_worker, chunk)
-            for chunk in _chunks(all_cells, TRANSLATE_CHUNK)
-        ]
+        futures = {
+            pool.submit(_worker, chunk, i + 1): i
+            for i, chunk in enumerate(all_chunks)
+        }
         for fut in as_completed(futures):
             try:
                 fut.result()
             except Exception as e:
-                progress(f"Chunk failed, skipping: {e}")
+                progress(f"ERROR chunk {futures[fut] + 1}: {e}")
 
     # ── Phase 3: write back — one batchUpdate per sheet ───────────────────────
     by_sheet: dict[str, list] = {}

@@ -145,9 +145,6 @@ def screen_translate():
 
     console.rule("[dim]Tiến trình[/dim]")
 
-    def _progress(msg: str):
-        console.print(f"  [dim]{msg}[/dim]")
-
     from src.tools.translate_google import translate_google_file, translate_google_files
     import time
 
@@ -158,6 +155,14 @@ def screen_translate():
         if s < 60:
             return f"{s:.1f}s"
         return f"{int(s) // 60}m {int(s) % 60}s"
+
+    def _progress(msg: str):
+        t_str = _fmt_elapsed()
+        is_error = msg.upper().startswith("ERROR") or "failed" in msg.lower()
+        if is_error:
+            console.print(f"  [red][{t_str}] {msg}[/red]")
+        else:
+            console.print(f"  [dim][{t_str}][/dim] {msg}")
 
     try:
         if multi:

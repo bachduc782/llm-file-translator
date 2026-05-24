@@ -7,6 +7,7 @@ import json
 import re
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
@@ -14,7 +15,7 @@ import config
 
 SCAN_ROW_BATCH  = 1000
 TRANSLATE_CHUNK = 20   # items per LLM call
-SHEET_WORKERS   = 1    # sequential per sheet — avoids rate-limit conflicts
+SHEET_WORKERS   = 4    # parallel LLM calls per sheet (rate limiter keeps within quota)
 FILE_WORKERS    = 3    # parallel across multiple files
 
 Progress = Callable[[str], None]
@@ -34,9 +35,48 @@ def _is_translatable(text: str) -> bool:
     return len(t) > 2 and not _RE_SKIP.match(t)
 
 
+# ── Rate limiter ──────────────────────────────────────────────────────────────
+
+class _RateLimiter:
+    """Sliding-window rate limiter, thread-safe."""
+    def __init__(self, max_calls: int, period: float = 60.0):
+        self.max_calls = max_calls
+        self.period    = period
+        self._lock     = threading.Lock()
+        self._calls: deque[float] = deque()
+
+    def acquire(self):
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                while self._calls and self._calls[0] <= now - self.period:
+                    self._calls.popleft()
+                if len(self._calls) < self.max_calls:
+                    self._calls.append(now)
+                    return
+                wait = self._calls[0] + self.period - now + 0.05
+            time.sleep(wait)
+
+
+_limiter: _RateLimiter | None = None
+_limiter_key: tuple | None    = None
+_limiter_meta_lock             = threading.Lock()
+
+
+def _get_limiter() -> _RateLimiter:
+    global _limiter, _limiter_key
+    cfg = config.get_llm_config()
+    key = (cfg["base_url"], cfg["rate_limit"])
+    with _limiter_meta_lock:
+        if _limiter is None or _limiter_key != key:
+            _limiter     = _RateLimiter(cfg["rate_limit"])
+            _limiter_key = key
+    return _limiter
+
+
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
-def _call_llm(prompt: str, retries: int = 6) -> str:
+def _call_llm(prompt: str, retries: int = 3) -> str:
     from openai import OpenAI
 
     cfg    = config.get_llm_config()
@@ -46,8 +86,11 @@ def _call_llm(prompt: str, retries: int = 6) -> str:
         default_headers=cfg.get("headers", {}),
         timeout=90.0,
     )
+    limiter   = _get_limiter()
     last_exc: Exception | None = None
+
     for attempt in range(retries):
+        limiter.acquire()   # wait for a rate-limit slot before each attempt
         try:
             resp = client.chat.completions.create(
                 model=cfg["model"],
@@ -62,8 +105,9 @@ def _call_llm(prompt: str, retries: int = 6) -> str:
         except Exception as exc:
             last_exc = exc
             if attempt < retries - 1:
-                wait = 2 ** (attempt + 1)  # 2 s, 4 s, 8 s, 16 s, 32 s
-                time.sleep(wait)
+                # Short extra wait for rate-limit errors, longer for others
+                is_429 = "429" in str(exc) or "rate" in str(exc).lower()
+                time.sleep(2 if is_429 else 2 ** (attempt + 1))
     raise last_exc  # type: ignore[misc]
 
 

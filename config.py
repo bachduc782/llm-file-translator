@@ -39,9 +39,9 @@ _patch_requests_ssl()
 
 PROVIDERS = {
     "openrouter": {
-        "label":    "OpenRouter",
-        "base_url": "https://openrouter.ai/api/v1",
-        "headers":  {
+        "label":      "OpenRouter",
+        "base_url":   "https://openrouter.ai/api/v1",
+        "headers":    {
             "HTTP-Referer": "https://langchain-google-translator",
             "X-Title":      "LangChain Google Translator",
         },
@@ -52,11 +52,12 @@ PROVIDERS = {
             "mistralai/mistral-small-3.1-24b-instruct:free",
             "deepseek/deepseek-chat:free",
         ],
+        "rate_limit": 20,   # req/min — conservative for free tier
     },
     "nvidia": {
-        "label":    "NVIDIA NIM",
-        "base_url": "https://integrate.api.nvidia.com/v1",
-        "headers":  {},
+        "label":      "NVIDIA NIM",
+        "base_url":   "https://integrate.api.nvidia.com/v1",
+        "headers":    {},
         "default_model": "meta/llama-3.1-70b-instruct",
         "models": [
             "meta/llama-3.1-70b-instruct",
@@ -65,6 +66,7 @@ PROVIDERS = {
             "mistralai/mistral-7b-instruct-v0.3",
             "microsoft/phi-3-mini-128k-instruct",
         ],
+        "rate_limit": 40,   # req/min
     },
 }
 
@@ -112,10 +114,11 @@ def get_llm_config() -> dict:
     p    = _active_provider
     info = PROVIDERS[p]
     return {
-        "base_url": info["base_url"],
-        "api_key":  _api_keys.get(p) or "none",
-        "model":    _models.get(p) or info["default_model"],
-        "headers":  info["headers"],
+        "base_url":   info["base_url"],
+        "api_key":    _api_keys.get(p) or "none",
+        "model":      _models.get(p) or info["default_model"],
+        "headers":    info["headers"],
+        "rate_limit": info.get("rate_limit", 20),
     }
 
 

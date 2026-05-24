@@ -210,6 +210,109 @@ def screen_translate():
     _press_enter()
 
 
+def screen_translate_local():
+    _header()
+    console.print(Panel("[bold]Dịch file local[/bold]", style="green", expand=False))
+    console.print()
+
+    console.print("[dim]Hỗ trợ: .xlsx  .docx  .txt[/dim]")
+    console.print("[dim]Nhập đường dẫn tuyệt đối, mỗi file một dòng. Dòng trống để kết thúc.[/dim]")
+    console.print()
+
+    file_paths: list[str] = []
+    idx = 1
+    while True:
+        val = Prompt.ask(f"  File {idx}").strip().strip('"').strip("'")
+        if not val:
+            break
+        if not os.path.isfile(val):
+            console.print(f"  [red]Không tìm thấy: {val}[/red]")
+            continue
+        file_paths.append(val)
+        idx += 1
+
+    if not file_paths:
+        return
+
+    language = Prompt.ask("Ngôn ngữ đích", default="Vietnamese")
+    sheet    = Prompt.ask("Tên sheet [dim](.xlsx only, để trống = tất cả)[/dim]", default="")
+
+    multi = len(file_paths) > 1
+    console.print()
+    console.print(
+        f"[dim]{'Mỗi file' if multi else 'File'} sẽ được sao chép với hậu tố ngôn ngữ "
+        f"(ví dụ [/dim][cyan]-jp[/cyan][dim]) — file gốc giữ nguyên."
+        + (f" {len(file_paths)} file chạy song song.[/dim]" if multi else "[/dim]")
+    )
+    console.print()
+
+    console.rule("[dim]Tiến trình[/dim]")
+
+    from src.tools.translate_local import translate_local_file, translate_local_files
+    import time
+
+    t0 = time.monotonic()
+
+    def _fmt_elapsed() -> str:
+        s = time.monotonic() - t0
+        return f"{s:.1f}s" if s < 60 else f"{int(s)//60}m {int(s)%60:02d}s"
+
+    def _progress(msg: str):
+        t_str    = _fmt_elapsed()
+        is_error = msg.upper().startswith("ERROR") or "failed" in msg.lower()
+        if is_error:
+            console.print(f"  [red][{t_str}] {msg}[/red]")
+        else:
+            console.print(f"  [dim][{t_str}][/dim] {msg}")
+
+    try:
+        if multi:
+            result = translate_local_files(file_paths, language, sheet, _progress)
+        else:
+            result = translate_local_file(file_paths[0], language, sheet, _progress)
+
+        elapsed = _fmt_elapsed()
+        console.rule()
+
+        if "error" in result:
+            console.print(f"[bold red]Lỗi:[/bold red] {result['error']}")
+            console.print(f"[dim]Thời gian: {elapsed}[/dim]")
+        elif multi:
+            lines = [
+                f"[bold]Tổng:[/bold] {result['total']} file  "
+                f"[green]✓ {result['succeeded']} thành công[/green]"
+                + (f"  [red]✗ {result['failed']} thất bại[/red]" if result["failed"] else "")
+            ]
+            for r in result.get("results", []):
+                cn = r.get("clone_name", "?")
+                n  = (r.get("cells_translated") or r.get("paragraphs_translated")
+                      or r.get("lines_translated", 0))
+                if r.get("ok"):
+                    lines.append(f"  [green]✓[/green] {cn} — {n} mục đã dịch")
+                else:
+                    lines.append(f"  [red]✗[/red] {cn}: {r.get('error', '?')}")
+            lines.append(f"[dim]Thời gian xử lý: {elapsed}[/dim]")
+            console.print(Panel("\n".join(lines), title="[bold]Kết quả[/bold]", style="green"))
+        else:
+            n  = (result.get("cells_translated") or result.get("paragraphs_translated")
+                  or result.get("lines_translated", 0))
+            cp = result.get("clone_path", "")
+            console.print(Panel(
+                f"[green]✓ Thành công![/green]\n"
+                f"File mới   : [cyan]{result.get('clone_name', '?')}[/cyan]\n"
+                f"Đường dẫn  : [dim]{cp}[/dim]\n"
+                f"Đã dịch    : {n} mục\n"
+                f"[dim]Thời gian xử lý: {elapsed}[/dim]",
+                title="[bold]Kết quả[/bold]", style="green",
+            ))
+    except Exception as e:
+        elapsed = _fmt_elapsed()
+        console.print(f"[bold red]Lỗi:[/bold red] {e}")
+        console.print(f"[dim]Thời gian: {elapsed}[/dim]")
+
+    _press_enter()
+
+
 def screen_list():
     _header()
     console.print(Panel("[bold]Liệt kê file Google Drive[/bold]", style="blue", expand=False))
@@ -346,8 +449,9 @@ def screen_settings():
 MENU_ITEMS = [
     ("1", "Xác thực Google (Auth Setup)", screen_auth),
     ("2", "Dịch file Google",             screen_translate),
-    ("3", "Liệt kê file Google Drive",    screen_list),
-    ("4", "Cài đặt Provider LLM",        screen_settings),
+    ("3", "Dịch file local (.xlsx/.docx/.txt)", screen_translate_local),
+    ("4", "Liệt kê file Google Drive",    screen_list),
+    ("5", "Cài đặt Provider LLM",        screen_settings),
     ("0", "Thoát",                        None),
 ]
 

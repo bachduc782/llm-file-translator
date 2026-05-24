@@ -176,9 +176,18 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
         row_offset = 0
         while True:
             range_str = f"'{sheet_name}'!A{row_offset + 1}:ZZ{row_offset + SCAN_ROW_BATCH}"
-            values = svc.spreadsheets().values().get(
-                spreadsheetId=sid, range=range_str
-            ).execute().get("values", [])
+            # Retry on transient SSL / network errors
+            for attempt in range(4):
+                try:
+                    values = svc.spreadsheets().values().get(
+                        spreadsheetId=sid, range=range_str
+                    ).execute().get("values", [])
+                    break
+                except Exception as exc:
+                    if attempt < 3:
+                        time.sleep(2 ** attempt)   # 1 s, 2 s, 4 s
+                    else:
+                        raise
             if not values:
                 break
             for r, row in enumerate(values):
@@ -192,8 +201,9 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
                 break
         return cells, raw
 
+    SCAN_WORKERS = min(len(sheet_names), 3)   # cap at 3 — avoids SSL issues with too many parallel TLS handshakes
     progress(f"Scanning {len(sheet_names)} sheet(s) in parallel…")
-    with ThreadPoolExecutor(max_workers=len(sheet_names)) as pool:
+    with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
         scan_futures = {pool.submit(_scan_sheet, sn): sn for sn in sheet_names}
         for fut in as_completed(scan_futures):
             cells, raw = fut.result()

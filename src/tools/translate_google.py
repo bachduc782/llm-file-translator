@@ -163,64 +163,85 @@ def _noop(*_): pass
 
 # ── Sheets ────────────────────────────────────────────────────────────────────
 
-def _sheets_worker(svc, sid, sheet_name, chunk, target_language) -> int:
-    texts      = [text for _, text in chunk]
-    translated = _translate_list(texts, target_language)
-    value_ranges = [
-        {"range": f"'{sheet_name}'!{_col_letter(col)}{row + 1}", "values": [[new]]}
-        for ((row, col), orig), new in zip(chunk, translated)
-        if orig != new
-    ]
-    if value_ranges:
-        svc.spreadsheets().values().batchUpdate(
-            spreadsheetId=sid,
-            body={"valueInputOption": "RAW", "data": value_ranges},
-        ).execute()
-    return len(chunk)
-
-
 def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress = _noop) -> int:
-    total = 0
+    # ── Phase 1: scan all sheets, collect every translatable cell ─────────────
+    # (sheet_name, row, col, original_text)
+    all_cells: list[tuple[str, int, int, str]] = []
+    total_raw = 0
+
     for sheet_name in sheet_names:
         row_offset = 0
         while True:
             range_str = f"'{sheet_name}'!A{row_offset + 1}:ZZ{row_offset + SCAN_ROW_BATCH}"
-            progress(f"[{sheet_name}] Scanning rows {row_offset + 1}–{row_offset + SCAN_ROW_BATCH}...")
+            progress(f"Scanning [{sheet_name}] rows {row_offset + 1}–{row_offset + SCAN_ROW_BATCH}…")
             values = svc.spreadsheets().values().get(
                 spreadsheetId=sid, range=range_str
             ).execute().get("values", [])
             if not values:
                 break
-
-            all_cells = [
-                ((row_offset + r, c), cell)
-                for r, row in enumerate(values)
-                for c, cell in enumerate(row)
-                if isinstance(cell, str) and cell.strip()
-            ]
-            # Skip cells that clearly don't need translation
-            cell_items  = [(pos, t) for pos, t in all_cells if _is_translatable(t)]
-            skipped     = len(all_cells) - len(cell_items)
-            if skipped:
-                progress(f"[{sheet_name}] Skipping {skipped} cells (numbers/codes/symbols)")
-
-            with ThreadPoolExecutor(max_workers=SHEET_WORKERS) as pool:
-                futures = [
-                    pool.submit(_sheets_worker, svc, sid, sheet_name, chunk, target_language)
-                    for chunk in _chunks(cell_items, TRANSLATE_CHUNK)
-                ]
-                for fut in as_completed(futures):
-                    try:
-                        n = fut.result()
-                        total += n
-                        progress(f"[{sheet_name}] Translated {n} cells (total: {total})")
-                    except Exception as e:
-                        progress(f"[{sheet_name}] Chunk failed, skipping: {e}")
-
+            for r, row in enumerate(values):
+                for c, cell in enumerate(row):
+                    if isinstance(cell, str) and cell.strip():
+                        total_raw += 1
+                        if _is_translatable(cell):
+                            all_cells.append((sheet_name, row_offset + r, c, cell))
             row_offset += SCAN_ROW_BATCH
             if len(values) < SCAN_ROW_BATCH:
                 break
-    return total
+
+    skipped = total_raw - len(all_cells)
+    progress(
+        f"Found {len(all_cells)} cells to translate across {len(sheet_names)} sheet(s)"
+        + (f" ({skipped} skipped)" if skipped else "")
+    )
+
+    if not all_cells:
+        return 0
+
+    # ── Phase 2: translate all cells together in parallel chunks ──────────────
+    translated_map: dict[tuple[str, int, int], str] = {}
+    lock  = threading.Lock()
+    done  = 0
+
+    def _worker(chunk: list[tuple[str, int, int, str]]):
+        nonlocal done
+        texts      = [t for _, _, _, t in chunk]
+        translated = _translate_list(texts, target_language)
+        with lock:
+            for (sn, r, c, orig), new in zip(chunk, translated):
+                if orig != new:
+                    translated_map[(sn, r, c)] = new
+            done += len(chunk)
+            progress(f"Translated {done}/{len(all_cells)} cells")
+
+    with ThreadPoolExecutor(max_workers=SHEET_WORKERS) as pool:
+        futures = [
+            pool.submit(_worker, chunk)
+            for chunk in _chunks(all_cells, TRANSLATE_CHUNK)
+        ]
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception as e:
+                progress(f"Chunk failed, skipping: {e}")
+
+    # ── Phase 3: write back — one batchUpdate per sheet ───────────────────────
+    by_sheet: dict[str, list] = {}
+    for (sn, r, c), new in translated_map.items():
+        by_sheet.setdefault(sn, []).append(
+            {"range": f"'{sn}'!{_col_letter(c)}{r + 1}", "values": [[new]]}
+        )
+
+    WRITE_BATCH = 500   # Sheets API limit per batchUpdate call
+    for sn, value_ranges in by_sheet.items():
+        for batch in _chunks(value_ranges, WRITE_BATCH):
+            svc.spreadsheets().values().batchUpdate(
+                spreadsheetId=sid,
+                body={"valueInputOption": "RAW", "data": batch},
+            ).execute()
+        progress(f"Written {len(value_ranges)} cells → [{sn}]")
+
+    return len(all_cells)
 
 
 # ── Docs ──────────────────────────────────────────────────────────────────────

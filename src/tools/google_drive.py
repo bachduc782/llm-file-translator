@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 from src.auth.google_auth import build_drive_service
 
@@ -52,15 +53,26 @@ def _clone_file_impl(drive, file_id: str, target_language: str) -> dict:
     suffix = _LANG_SUFFIX.get(target_language.lower(), target_language[:2].lower())
     clone_name = f"{original_name}-{suffix}"
 
-    try:
-        clone_meta = {"name": clone_name}
-        if parents:
-            clone_meta["parents"] = parents
-        clone = drive.files().copy(
-            fileId=clean_id, body=clone_meta, supportsAllDrives=True
-        ).execute()
-    except Exception as e:
-        return {"error": f"Cannot clone file: {e}", "original_id": clean_id}
+    clone_meta = {"name": clone_name}
+    if parents:
+        clone_meta["parents"] = parents
+
+    last_exc: Exception | None = None
+    for attempt in range(5):
+        try:
+            clone = drive.files().copy(
+                fileId=clean_id, body=clone_meta, supportsAllDrives=True
+            ).execute()
+            break
+        except Exception as e:
+            last_exc = e
+            is_rate = "rate limit" in str(e).lower() or "429" in str(e) or "403" in str(e)
+            if is_rate and attempt < 4:
+                time.sleep(2 ** (attempt + 1))  # 2 s, 4 s, 8 s, 16 s
+                continue
+            return {"error": f"Cannot clone file: {e}", "original_id": clean_id}
+    else:
+        return {"error": f"Cannot clone file: {last_exc}", "original_id": clean_id}
 
     return {
         "ok": True,

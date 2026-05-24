@@ -1,4 +1,4 @@
-"""Google OAuth 2.0 authentication helpers."""
+"""Google OAuth 2.0認証ユーティリティ。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import config
 
 
 class _UrllibRequest:
-    """google.auth transport.Request implementation using urllib — avoids requests SSL issues."""
+    """urllibを使ったgoogle.auth transport.Request実装 — requestsのSSL問題を回避。"""
 
     def __call__(self, url, method="GET", body=None, headers=None, timeout=60, **kwargs):
         import urllib.request as _ul
@@ -31,14 +31,14 @@ class _UrllibResponse:
 
 
 def _load_credentials():
-    """Load and refresh Google OAuth credentials from token file."""
+    """トークンファイルからGoogle OAuth認証情報を読み込み、必要に応じてリフレッシュする。"""
     from google.oauth2.credentials import Credentials
 
     token_file = config.GOOGLE_TOKEN_FILE
     if not os.path.exists(token_file):
         raise RuntimeError(
-            f"Google token not found at '{token_file}'. "
-            "Run: python auth_setup.py"
+            f"'{token_file}' にGoogleトークンが見つかりません。"
+            "python auth_setup.py を実行してください。"
         )
 
     creds = Credentials.from_authorized_user_file(token_file, config.GOOGLE_OAUTH_SCOPES)

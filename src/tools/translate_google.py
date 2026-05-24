@@ -1,4 +1,4 @@
-"""Parallel Google file translator — Sheets, Docs, plain-text Drive files."""
+"""並列Googleファイル翻訳エンジン — Sheets、Docs、プレーンテキスト対応。"""
 
 from __future__ import annotations
 
@@ -14,19 +14,19 @@ from typing import Callable
 import config
 
 SCAN_ROW_BATCH  = 1000
-TRANSLATE_CHUNK = 20   # items per LLM call
-SHEET_WORKERS   = 4    # parallel LLM calls per sheet (rate limiter keeps within quota)
-FILE_WORKERS    = 3    # parallel across multiple files
+TRANSLATE_CHUNK = 20   # LLM呼び出し1回あたりのアイテム数
+SHEET_WORKERS   = 40   # 並列LLMワーカー数 — レートリミッター（40回/分）が実際の制御者
+FILE_WORKERS    = 3    # 複数ファイルの並列処理数
 
 Progress = Callable[[str], None]
 
-# Cells matching this pattern don't need translation
+# このパターンに一致するセルは翻訳不要
 _RE_SKIP = re.compile(
-    r'^[\d\s,.\-+%/()\[\]{}:;*|]+$'   # pure numbers / punctuation
-    r'|^[A-Z0-9][A-Z0-9_.\-]{1,29}$'  # ALL_CAPS_CODE — TEST_001, NO-123
-    r'|^https?://'                      # URLs
-    r'|^[a-zA-Z0-9._%+\-]+@\S+'        # email addresses
-    r'|^\d{4}[-/]\d{2}[-/]\d{2}',      # ISO dates — 2024-01-01
+    r'^[\d\s,.\-+%/()\[\]{}:;*|]+$'   # 数字・記号のみ
+    r'|^[A-Z0-9][A-Z0-9_.\-]{1,29}$'  # 大文字コード — TEST_001, NO-123
+    r'|^https?://'                      # URL
+    r'|^[a-zA-Z0-9._%+\-]+@\S+'        # メールアドレス
+    r'|^\d{4}[-/]\d{2}[-/]\d{2}',      # ISO日付 — 2024-01-01
 )
 
 
@@ -35,10 +35,10 @@ def _is_translatable(text: str) -> bool:
     return len(t) > 2 and not _RE_SKIP.match(t)
 
 
-# ── Rate limiter ──────────────────────────────────────────────────────────────
+# ── レートリミッター ──────────────────────────────────────────────────────────
 
 class _RateLimiter:
-    """Sliding-window rate limiter, thread-safe."""
+    """スライディングウィンドウ方式のスレッドセーフなレートリミッター。"""
     def __init__(self, max_calls: int, period: float = 60.0):
         self.max_calls = max_calls
         self.period    = period
@@ -142,7 +142,7 @@ def _translate_list(items: list[str], target_language: str, on_retry=None) -> li
     return (result + items[len(result):])[:len(items)]
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── ユーティリティ ────────────────────────────────────────────────────────────
 
 def _col_letter(idx: int) -> str:
     result = ""
@@ -166,7 +166,7 @@ def _noop(*_): pass
 # ── Sheets ────────────────────────────────────────────────────────────────────
 
 def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress = _noop) -> int:
-    # ── Phase 1: scan all sheets in parallel ──────────────────────────────────
+    # ── フェーズ1：全シートを並列スキャン ────────────────────────────────────
     all_cells: list[tuple[str, int, int, str]] = []
     total_raw = 0
     scan_lock = threading.Lock()
@@ -176,7 +176,7 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
         row_offset = 0
         while True:
             range_str = f"'{sheet_name}'!A{row_offset + 1}:ZZ{row_offset + SCAN_ROW_BATCH}"
-            # Retry on transient SSL / network errors
+            # 一時的なSSL/ネットワークエラー時にリトライ
             for attempt in range(4):
                 try:
                     values = svc.spreadsheets().values().get(
@@ -185,7 +185,7 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
                     break
                 except Exception as exc:
                     if attempt < 3:
-                        time.sleep(2 ** attempt)   # 1 s, 2 s, 4 s
+                        time.sleep(2 ** attempt)   # 1秒, 2秒, 4秒
                     else:
                         raise
             if not values:
@@ -201,26 +201,26 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
                 break
         return cells, raw
 
-    SCAN_WORKERS = min(len(sheet_names), 3)   # cap at 3 — avoids SSL issues with too many parallel TLS handshakes
-    progress(f"Scanning {len(sheet_names)} sheet(s) in parallel…")
+    SCAN_WORKERS = min(len(sheet_names), 3)   # 上限3 — 並列TLSハンドシェイクによるSSLエラーを回避
+    progress(f"{len(sheet_names)}シートを並列スキャン中…")
     with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
         scan_futures = {pool.submit(_scan_sheet, sn): sn for sn in sheet_names}
         for fut in as_completed(scan_futures):
             cells, raw = fut.result()
             all_cells.extend(cells)
             total_raw += raw
-            progress(f"  [{scan_futures[fut]}] {len(cells)} cells found")
+            progress(f"  [{scan_futures[fut]}] {len(cells)}セル検出")
 
     skipped = total_raw - len(all_cells)
     progress(
-        f"Total: {len(all_cells)} cells to translate"
-        + (f" ({skipped} skipped)" if skipped else "")
+        f"合計: {len(all_cells)}セルを翻訳します"
+        + (f" ({skipped}件スキップ)" if skipped else "")
     )
 
     if not all_cells:
         return 0
 
-    # ── Phase 2: translate all cells together in parallel chunks ──────────────
+    # ── フェーズ2：全セルを並列チャンクで一括翻訳 ────────────────────────────
     translated_map: dict[tuple[str, int, int], str] = {}
     lock          = threading.Lock()
     done          = 0
@@ -229,10 +229,10 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
 
     def _worker(chunk: list[tuple[str, int, int, str]], idx: int):
         nonlocal done
-        progress(f"[{idx}/{total_chunks}] Calling LLM for {len(chunk)} cells…")
+        progress(f"[{idx}/{total_chunks}] LLMを呼び出し中 ({len(chunk)}セル)…")
 
         def _on_retry(attempt, total, exc, wait):
-            progress(f"RETRY [{idx}/{total_chunks}] attempt {attempt}/{total} (wait {wait}s) — {exc}")
+            progress(f"リトライ [{idx}/{total_chunks}] 試行 {attempt}/{total} (待機 {wait}秒) — {exc}")
 
         texts      = [t for _, _, _, t in chunk]
         translated = _translate_list(texts, target_language, on_retry=_on_retry)
@@ -241,7 +241,7 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
                 if orig != new:
                     translated_map[(sn, r, c)] = new
             done += len(chunk)
-            progress(f"[{idx}/{total_chunks}] Done — {done}/{len(all_cells)} cells translated")
+            progress(f"[{idx}/{total_chunks}] 完了 — {done}/{len(all_cells)}セル翻訳済み")
 
     with ThreadPoolExecutor(max_workers=SHEET_WORKERS) as pool:
         futures = {
@@ -252,23 +252,23 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
             try:
                 fut.result()
             except Exception as e:
-                progress(f"ERROR chunk {futures[fut] + 1}: {e}")
+                progress(f"ERROR チャンク {futures[fut] + 1}: {e}")
 
-    # ── Phase 3: write back — one batchUpdate per sheet ───────────────────────
+    # ── フェーズ3：書き戻し — シートごとにbatchUpdate ────────────────────────
     by_sheet: dict[str, list] = {}
     for (sn, r, c), new in translated_map.items():
         by_sheet.setdefault(sn, []).append(
             {"range": f"'{sn}'!{_col_letter(c)}{r + 1}", "values": [[new]]}
         )
 
-    WRITE_BATCH = 500   # Sheets API limit per batchUpdate call
+    WRITE_BATCH = 500   # batchUpdate1回あたりのSheets API上限
     for sn, value_ranges in by_sheet.items():
         for batch in _chunks(value_ranges, WRITE_BATCH):
             svc.spreadsheets().values().batchUpdate(
                 spreadsheetId=sid,
                 body={"valueInputOption": "RAW", "data": batch},
             ).execute()
-        progress(f"Written {len(value_ranges)} cells → [{sn}]")
+        progress(f"{len(value_ranges)}セルを書き込み → [{sn}]")
 
     return len(all_cells)
 
@@ -311,14 +311,14 @@ def _translate_docs(svc, doc_id, target_language, progress: Progress = _noop) ->
             try:
                 n = fut.result()
                 done += n
-                progress(f"Translated {done}/{total} paragraphs")
+                progress(f"{done}/{total}段落翻訳済み")
             except Exception as e:
-                progress(f"Paragraph chunk failed, skipping: {e}")
+                progress(f"段落チャンクが失敗しました、スキップ: {e}")
 
     return done
 
 
-# ── Plain text ────────────────────────────────────────────────────────────────
+# ── プレーンテキスト ──────────────────────────────────────────────────────────
 
 def _translate_txt(drive, file_id, target_language, progress: Progress = _noop) -> int:
     from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
@@ -345,7 +345,7 @@ def _translate_txt(drive, file_id, target_language, progress: Progress = _noop) 
             for (idx, _), new in zip(chunk, result):
                 translated_map[idx] = new
             done += len(chunk)
-            progress(f"Translated {done}/{total} lines")
+            progress(f"{done}/{total}行翻訳済み")
 
     with ThreadPoolExecutor(max_workers=SHEET_WORKERS) as pool:
         futures = [pool.submit(_worker, chunk) for chunk in _chunks(indexed, TRANSLATE_CHUNK)]
@@ -353,7 +353,7 @@ def _translate_txt(drive, file_id, target_language, progress: Progress = _noop) 
             try:
                 fut.result()
             except Exception as e:
-                progress(f"Line chunk failed, skipping: {e}")
+                progress(f"行チャンクが失敗しました、スキップ: {e}")
 
     for idx, new in translated_map.items():
         all_lines[idx] = new
@@ -368,7 +368,7 @@ def _translate_txt(drive, file_id, target_language, progress: Progress = _noop) 
     return total
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+# ── 公開API ───────────────────────────────────────────────────────────────────
 
 def translate_google_file(
     file_id: str,
@@ -376,7 +376,7 @@ def translate_google_file(
     sheet_name: str = "",
     progress: Progress = _noop,
 ) -> dict:
-    """Clone + translate a single Google file. Returns result dict."""
+    """Googleファイルを1つ複製して翻訳する。結果dictを返す。"""
     from src.auth.google_auth import build_drive_service, build_sheets_service, build_docs_service
     from src.tools.google_drive import _clone_file_impl
     from src.tools.google_sheets import _parse_spreadsheet_id
@@ -384,7 +384,7 @@ def translate_google_file(
 
     drive = build_drive_service()
 
-    progress("Cloning file...")
+    progress("ファイルを複製中...")
     clone = _clone_file_impl(drive, file_id, target_language)
     if "error" in clone:
         return {"error": clone["error"], "original_id": file_id}
@@ -392,7 +392,7 @@ def translate_google_file(
     clone_id   = clone["clone_id"]
     clone_name = clone["clone_name"]
     mime       = clone["file_type"]
-    progress(f"Clone: {clone['original_name']} → {clone_name}")
+    progress(f"複製完了: {clone['original_name']} → {clone_name}")
 
     try:
         if mime == "application/vnd.google-apps.spreadsheet":
@@ -420,7 +420,7 @@ def translate_google_file(
                     "lines_translated": total}
 
         else:
-            return {"error": f"Unsupported file type: {mime}", "clone_name": clone_name}
+            return {"error": f"未対応のファイル形式: {mime}", "clone_name": clone_name}
 
     except Exception as e:
         return {"error": str(e), "clone_name": clone_name}
@@ -432,7 +432,7 @@ def translate_google_files(
     sheet_name: str = "",
     progress: Progress = _noop,
 ) -> dict:
-    """Clone + translate multiple Google files in parallel."""
+    """複数のGoogleファイルを並列で複製・翻訳する。"""
     results: list[dict] = [{}] * len(file_ids)
 
     def _process(idx: int, fid: str):

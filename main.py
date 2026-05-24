@@ -1,4 +1,4 @@
-"""CLI entry point for Google Translator."""
+"""LLM File TranslatorのCLIエントリーポイント。"""
 
 from __future__ import annotations
 
@@ -10,22 +10,22 @@ import sys
 def cmd_translate(args):
     from src.tools.translate_google import translate_google_file
 
-    target = args.language or "Vietnamese"
+    target = args.language or "Japanese"
 
     def _progress(msg: str):
         print(f"  {msg}")
 
-    print(f"Translating to {target}...\n{'─' * 50}")
+    print(f"{target}に翻訳中...\n{'─' * 50}")
     result = translate_google_file(args.file_id, target, args.sheet or "", _progress)
     print("─" * 50)
 
     if "error" in result:
-        print(f"Error: {result['error']}", file=sys.stderr)
+        print(f"エラー: {result['error']}", file=sys.stderr)
         sys.exit(1)
 
     n = (result.get("cells_translated") or result.get("paragraphs_translated")
          or result.get("lines_translated", 0))
-    print(f"Done! Clone: {result.get('clone_name', '?')}  —  {n} items translated.")
+    print(f"完了！複製ファイル: {result.get('clone_name', '?')}  —  {n}項目翻訳済み。")
 
 
 def cmd_list(args):
@@ -38,14 +38,14 @@ def cmd_list(args):
     )
     data = json.loads(raw)
     if "error" in data:
-        print(f"Error: {data['error']}", file=sys.stderr)
+        print(f"エラー: {data['error']}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Folder: {data['folder_id']}  ({data['count']} files)")
+    print(f"フォルダ: {data['folder_id']}  ({data['count']}件)")
     print("─" * 60)
     for f in data["files"]:
         size = f.get("size", "")
-        size_str = f" [{int(size):,} bytes]" if size else ""
+        size_str = f" [{int(size):,} バイト]" if size else ""
         print(f"  {f['name']:<40} {f['mimeType'].split('.')[-1]}{size_str}")
         if f.get("webViewLink"):
             print(f"    {f['webViewLink']}")
@@ -53,21 +53,21 @@ def cmd_list(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="langchain-translator",
-        description="Translate Google Drive files using an LLM",
+        prog="llm-file-translator",
+        description="LLMを使ってGoogleドライブのファイルを翻訳します",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_translate = sub.add_parser("translate", help="Translate a Google file")
-    p_translate.add_argument("file_id", help="Google file ID or URL")
-    p_translate.add_argument("-l", "--language", default="Vietnamese", help="Target language (default: Vietnamese)")
-    p_translate.add_argument("-s", "--sheet", default="", help="Sheet name (Sheets only)")
+    p_translate = sub.add_parser("translate", help="Googleファイルを翻訳する")
+    p_translate.add_argument("file_id", help="GoogleファイルIDまたはURL")
+    p_translate.add_argument("-l", "--language", default="Japanese", help="翻訳先言語（デフォルト: Japanese）")
+    p_translate.add_argument("-s", "--sheet", default="", help="シート名（Sheetsのみ）")
     p_translate.set_defaults(func=cmd_translate)
 
-    p_list = sub.add_parser("list", help="List files in Google Drive")
-    p_list.add_argument("folder_id", nargs="?", default="root", help="Folder ID or URL (default: root)")
-    p_list.add_argument("-q", "--query", default="", help="Search keyword")
-    p_list.add_argument("-n", "--limit", type=int, default=50, help="Max results")
+    p_list = sub.add_parser("list", help="Google Driveのファイル一覧を表示する")
+    p_list.add_argument("folder_id", nargs="?", default="root", help="フォルダIDまたはURL（デフォルト: root）")
+    p_list.add_argument("-q", "--query", default="", help="検索キーワード")
+    p_list.add_argument("-n", "--limit", type=int, default=50, help="最大件数")
     p_list.set_defaults(func=cmd_list)
 
     args = parser.parse_args()

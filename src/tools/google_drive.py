@@ -1,4 +1,4 @@
-"""Google Drive helpers."""
+"""Google Driveユーティリティ。"""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def _resolve_file_id(url_or_id: str) -> str:
 
 
 def _clone_file_impl(drive, file_id: str, target_language: str) -> dict:
-    """Clone a single file and return result dict."""
+    """ファイルを1つ複製して結果dictを返す。"""
     clean_id = _resolve_file_id(file_id)
 
     try:
@@ -46,7 +46,7 @@ def _clone_file_impl(drive, file_id: str, target_language: str) -> dict:
             fileId=clean_id, fields="id,name,mimeType,parents", supportsAllDrives=True
         ).execute()
     except Exception as e:
-        return {"error": f"Cannot access file: {e}", "original_id": file_id}
+        return {"error": f"ファイルにアクセスできません: {e}", "original_id": file_id}
 
     original_name = meta.get("name", clean_id)
     parents = meta.get("parents", [])
@@ -68,11 +68,11 @@ def _clone_file_impl(drive, file_id: str, target_language: str) -> dict:
             last_exc = e
             is_rate = "rate limit" in str(e).lower() or "429" in str(e) or "403" in str(e)
             if is_rate and attempt < 4:
-                time.sleep(2 ** (attempt + 1))  # 2 s, 4 s, 8 s, 16 s
+                time.sleep(2 ** (attempt + 1))  # 2秒, 4秒, 8秒, 16秒
                 continue
-            return {"error": f"Cannot clone file: {e}", "original_id": clean_id}
+            return {"error": f"ファイルを複製できません: {e}", "original_id": clean_id}
     else:
-        return {"error": f"Cannot clone file: {last_exc}", "original_id": clean_id}
+        return {"error": f"ファイルを複製できません: {last_exc}", "original_id": clean_id}
 
     return {
         "ok": True,
@@ -85,7 +85,7 @@ def _clone_file_impl(drive, file_id: str, target_language: str) -> dict:
 
 
 def list_drive_files(folder_id: str = "root", query: str = "", page_size: int = 50) -> str:
-    """List files and folders in Google Drive. Returns JSON string."""
+    """Google Drive内のファイル一覧を取得する。JSON文字列を返す。"""
     drive = build_drive_service()
     fid = _parse_drive_id(folder_id)
 

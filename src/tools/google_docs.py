@@ -1,4 +1,4 @@
-"""Google Docs helpers."""
+"""Google Docsユーティリティ。"""
 
 from __future__ import annotations
 

@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Patch requests SSL context early — fixes UNEXPECTED_EOF on Python 3.14
+# requestsのSSLコンテキストを早期にパッチ — Python 3.14のUNEXPECTED_EOFを回避
 def _patch_requests_ssl():
     try:
         import requests
@@ -35,15 +35,15 @@ def _patch_requests_ssl():
 
 _patch_requests_ssl()
 
-# ── Provider definitions ──────────────────────────────────────────────────────
+# ── プロバイダー定義 ──────────────────────────────────────────────────────────
 
 PROVIDERS = {
     "openrouter": {
         "label":      "OpenRouter",
         "base_url":   "https://openrouter.ai/api/v1",
         "headers":    {
-            "HTTP-Referer": "https://langchain-google-translator",
-            "X-Title":      "LangChain Google Translator",
+            "HTTP-Referer": "https://llm-file-translator",
+            "X-Title":      "LLM File Translator",
         },
         "default_model": "google/gemini-2.0-flash-exp:free",
         "models": [
@@ -52,7 +52,7 @@ PROVIDERS = {
             "mistralai/mistral-small-3.1-24b-instruct:free",
             "deepseek/deepseek-chat:free",
         ],
-        "rate_limit": 20,   # req/min — conservative for free tier
+        "rate_limit": 20,   # req/min — 無料枠向けの保守値
     },
     "nvidia": {
         "label":      "NVIDIA NIM",
@@ -70,7 +70,7 @@ PROVIDERS = {
     },
 }
 
-# ── Active provider state (runtime-switchable) ────────────────────────────────
+# ── アクティブプロバイダー状態（実行時切替可能）────────────────────────────
 
 _active_provider: str = os.environ.get("PROVIDER", "openrouter")
 _api_keys: dict[str, str] = {
@@ -110,7 +110,7 @@ def set_model(provider: str, model: str) -> None:
 
 
 def get_llm_config() -> dict:
-    """Return LLM connection config for the active provider."""
+    """アクティブプロバイダーのLLM接続設定を返す。"""
     p    = _active_provider
     info = PROVIDERS[p]
     return {
@@ -123,7 +123,7 @@ def get_llm_config() -> dict:
 
 
 def save_to_env() -> None:
-    """Persist current provider settings to .env file."""
+    """現在のプロバイダー設定を.envファイルに保存する。"""
     env_path = ".env"
     try:
         with open(env_path, encoding="utf-8") as f:
@@ -148,7 +148,7 @@ def save_to_env() -> None:
         f.writelines(lines)
 
 
-# Google OAuth
+# Google OAuth設定
 GOOGLE_CREDENTIALS_FILE = os.environ.get("GOOGLE_CREDENTIALS_FILE", "config/google_credentials.json")
 GOOGLE_TOKEN_FILE        = os.environ.get("GOOGLE_TOKEN_FILE",        "config/google_token.json")
 GOOGLE_OAUTH_SCOPES = [

@@ -9,9 +9,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.tools.translate_google import (
     _translate_list, _is_translatable, _chunks,
-    TRANSLATE_CHUNK, SHEET_WORKERS, FILE_WORKERS,
+    TRANSLATE_CHUNK, FILE_WORKERS,
     Progress, _noop,
 )
+
+# Local files have no Google API rate limit — use more workers to saturate
+# the LLM rate limit (40 req/min → need ~7+ concurrent workers at 10s/call)
+LOCAL_WORKERS = 8
 from src.tools.google_drive import _LANG_SUFFIX
 
 SUPPORTED_EXT = {".xlsx", ".docx", ".txt"}
@@ -80,7 +84,7 @@ def _translate_xlsx(file_path: str, sheet_name: str, target_language: str, progr
             done += len(chunk)
             progress(f"[{idx}/{total_chunks}] Done — {done}/{len(all_cells)} cells translated")
 
-    with ThreadPoolExecutor(max_workers=SHEET_WORKERS) as pool:
+    with ThreadPoolExecutor(max_workers=LOCAL_WORKERS) as pool:
         futures = {pool.submit(_worker, chunk, i + 1): i for i, chunk in enumerate(all_chunks)}
         for fut in as_completed(futures):
             try:
@@ -156,7 +160,7 @@ def _translate_docx(file_path: str, target_language: str, progress: Progress) ->
             done += len(chunk)
             progress(f"[{idx}/{total_chunks}] Done — {done}/{total} paragraphs translated")
 
-    with ThreadPoolExecutor(max_workers=SHEET_WORKERS) as pool:
+    with ThreadPoolExecutor(max_workers=LOCAL_WORKERS) as pool:
         futures = {pool.submit(_worker, chunk, i + 1): i for i, chunk in enumerate(all_chunks)}
         for fut in as_completed(futures):
             try:
@@ -209,7 +213,7 @@ def _translate_txt_local(file_path: str, target_language: str, progress: Progres
             done += len(chunk)
             progress(f"[{idx}/{total_chunks}] Done — {done}/{total} lines translated")
 
-    with ThreadPoolExecutor(max_workers=SHEET_WORKERS) as pool:
+    with ThreadPoolExecutor(max_workers=LOCAL_WORKERS) as pool:
         futures = {pool.submit(_worker, chunk, i + 1): i for i, chunk in enumerate(all_chunks)}
         for fut in as_completed(futures):
             try:

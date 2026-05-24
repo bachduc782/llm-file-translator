@@ -76,7 +76,7 @@ def _get_limiter() -> _RateLimiter:
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
-def _call_llm(prompt: str, retries: int = 3) -> str:
+def _call_llm(prompt: str, retries: int = 3, on_retry=None) -> str:
     from openai import OpenAI
 
     cfg    = config.get_llm_config()
@@ -90,7 +90,7 @@ def _call_llm(prompt: str, retries: int = 3) -> str:
     last_exc: Exception | None = None
 
     for attempt in range(retries):
-        limiter.acquire()   # wait for a rate-limit slot before each attempt
+        limiter.acquire()
         try:
             resp = client.chat.completions.create(
                 model=cfg["model"],
@@ -105,13 +105,15 @@ def _call_llm(prompt: str, retries: int = 3) -> str:
         except Exception as exc:
             last_exc = exc
             if attempt < retries - 1:
-                # Short extra wait for rate-limit errors, longer for others
                 is_429 = "429" in str(exc) or "rate" in str(exc).lower()
-                time.sleep(2 if is_429 else 2 ** (attempt + 1))
+                wait   = 2 if is_429 else 2 ** (attempt + 1)
+                if on_retry:
+                    on_retry(attempt + 1, retries, exc, wait)
+                time.sleep(wait)
     raise last_exc  # type: ignore[misc]
 
 
-def _translate_list(items: list[str], target_language: str) -> list[str]:
+def _translate_list(items: list[str], target_language: str, on_retry=None) -> list[str]:
     prompt = (
         f"Translate the following list of text items to {target_language}.\n"
         "Rules:\n"
@@ -121,7 +123,7 @@ def _translate_list(items: list[str], target_language: str) -> list[str]:
         "- Return ONLY valid JSON array of strings, no explanation, no markdown.\n\n"
         f"Input:\n{json.dumps(items, ensure_ascii=False)}"
     )
-    raw = _call_llm(prompt)
+    raw = _call_llm(prompt, on_retry=on_retry)
     if not raw.strip():
         return items
     try:
@@ -164,16 +166,16 @@ def _noop(*_): pass
 # ── Sheets ────────────────────────────────────────────────────────────────────
 
 def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress = _noop) -> int:
-    # ── Phase 1: scan all sheets, collect every translatable cell ─────────────
-    # (sheet_name, row, col, original_text)
+    # ── Phase 1: scan all sheets in parallel ──────────────────────────────────
     all_cells: list[tuple[str, int, int, str]] = []
     total_raw = 0
+    scan_lock = threading.Lock()
 
-    for sheet_name in sheet_names:
+    def _scan_sheet(sheet_name: str):
+        cells, raw = [], 0
         row_offset = 0
         while True:
             range_str = f"'{sheet_name}'!A{row_offset + 1}:ZZ{row_offset + SCAN_ROW_BATCH}"
-            progress(f"Scanning [{sheet_name}] rows {row_offset + 1}–{row_offset + SCAN_ROW_BATCH}…")
             values = svc.spreadsheets().values().get(
                 spreadsheetId=sid, range=range_str
             ).execute().get("values", [])
@@ -182,16 +184,26 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
             for r, row in enumerate(values):
                 for c, cell in enumerate(row):
                     if isinstance(cell, str) and cell.strip():
-                        total_raw += 1
+                        raw += 1
                         if _is_translatable(cell):
-                            all_cells.append((sheet_name, row_offset + r, c, cell))
+                            cells.append((sheet_name, row_offset + r, c, cell))
             row_offset += SCAN_ROW_BATCH
             if len(values) < SCAN_ROW_BATCH:
                 break
+        return cells, raw
+
+    progress(f"Scanning {len(sheet_names)} sheet(s) in parallel…")
+    with ThreadPoolExecutor(max_workers=len(sheet_names)) as pool:
+        scan_futures = {pool.submit(_scan_sheet, sn): sn for sn in sheet_names}
+        for fut in as_completed(scan_futures):
+            cells, raw = fut.result()
+            all_cells.extend(cells)
+            total_raw += raw
+            progress(f"  [{scan_futures[fut]}] {len(cells)} cells found")
 
     skipped = total_raw - len(all_cells)
     progress(
-        f"Found {len(all_cells)} cells to translate across {len(sheet_names)} sheet(s)"
+        f"Total: {len(all_cells)} cells to translate"
         + (f" ({skipped} skipped)" if skipped else "")
     )
 
@@ -208,8 +220,12 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
     def _worker(chunk: list[tuple[str, int, int, str]], idx: int):
         nonlocal done
         progress(f"[{idx}/{total_chunks}] Calling LLM for {len(chunk)} cells…")
+
+        def _on_retry(attempt, total, exc, wait):
+            progress(f"RETRY [{idx}/{total_chunks}] attempt {attempt}/{total} (wait {wait}s) — {exc}")
+
         texts      = [t for _, _, _, t in chunk]
-        translated = _translate_list(texts, target_language)
+        translated = _translate_list(texts, target_language, on_retry=_on_retry)
         with lock:
             for (sn, r, c, orig), new in zip(chunk, translated):
                 if orig != new:

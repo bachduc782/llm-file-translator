@@ -51,16 +51,22 @@ def _load_credentials():
     return creds
 
 
+def _authorized_http(timeout: int = 120):
+    import httplib2
+    from google_auth_httplib2 import AuthorizedHttp
+    return AuthorizedHttp(_load_credentials(), http=httplib2.Http(timeout=timeout))
+
+
 def build_drive_service():
     from googleapiclient.discovery import build
-    return build("drive", "v3", credentials=_load_credentials(), cache_discovery=False)
+    return build("drive", "v3", http=_authorized_http(), cache_discovery=False)
 
 
 def build_sheets_service():
     from googleapiclient.discovery import build
-    return build("sheets", "v4", credentials=_load_credentials(), cache_discovery=False)
+    return build("sheets", "v4", http=_authorized_http(), cache_discovery=False)
 
 
 def build_docs_service():
     from googleapiclient.discovery import build
-    return build("docs", "v1", credentials=_load_credentials(), cache_discovery=False)
+    return build("docs", "v1", http=_authorized_http(), cache_discovery=False)

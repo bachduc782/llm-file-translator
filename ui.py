@@ -44,6 +44,35 @@ def _patch_ssl():
 
 _patch_ssl()
 
+# ── クラッシュログ ────────────────────────────────────────────────────────────
+import sys as _sys, traceback as _traceback, threading as _threading, datetime as _dt
+
+_CRASH_LOG = "logs/crash.log"
+
+def _write_crash(header: str, tb_str: str = ""):
+    try:
+        os.makedirs("logs", exist_ok=True)
+        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*60}\n[{_dt.datetime.now():%Y-%m-%d %H:%M:%S}] {header}\n")
+            if tb_str:
+                f.write(tb_str)
+    except Exception:
+        pass
+
+_orig_excepthook = _sys.excepthook
+def _excepthook(et, ev, tb):
+    _write_crash(f"UNHANDLED {et.__name__}: {ev}", "".join(_traceback.format_tb(tb)))
+    _orig_excepthook(et, ev, tb)
+_sys.excepthook = _excepthook
+
+if hasattr(_threading, "excepthook"):
+    def _thread_excepthook(args):
+        _write_crash(
+            f"THREAD '{getattr(args.thread,'name','?')}' {args.exc_type.__name__}: {args.exc_value}",
+            "".join(_traceback.format_tb(args.exc_traceback)) if args.exc_traceback else "",
+        )
+    _threading.excepthook = _thread_excepthook
+
 TITLE = "[bold cyan]LLM File Translator[/bold cyan]"
 VERSION = "v2.0"
 
@@ -146,7 +175,22 @@ def screen_translate():
     console.rule("[dim]進捗[/dim]")
 
     from src.tools.translate_google import translate_google_file, translate_google_files
-    import time
+    import ctypes, time, traceback as _tb
+
+    # 翻訳中はWindowsのスリープ・休止を防止する
+    _ES_CONTINUOUS      = 0x80000000
+    _ES_SYSTEM_REQUIRED = 0x00000001
+    try:
+        ctypes.windll.kernel32.SetThreadExecutionState(_ES_CONTINUOUS | _ES_SYSTEM_REQUIRED)
+    except Exception:
+        pass
+
+    # ログファイル（実行ごとに1ファイル）
+    import datetime as _dt2
+    os.makedirs("logs", exist_ok=True)
+    _log_path = f"logs/translate_{_dt2.datetime.now():%Y%m%d_%H%M%S}.log"
+    _log_f    = open(_log_path, "w", encoding="utf-8", buffering=1)
+    console.print(f"[dim]ログ → {_log_path}[/dim]")
 
     t0 = time.monotonic()
 
@@ -159,6 +203,10 @@ def screen_translate():
     def _progress(msg: str):
         t_str = _fmt_elapsed()
         is_error = msg.upper().startswith("ERROR") or "failed" in msg.lower()
+        try:
+            _log_f.write(f"[{t_str}] {msg}\n")
+        except Exception:
+            pass
         if is_error:
             console.print(f"  [red][{t_str}] {msg}[/red]")
         else:
@@ -176,6 +224,11 @@ def screen_translate():
         if "error" in result:
             console.print(f"[bold red]エラー:[/bold red] {result['error']}")
             console.print(f"[dim]処理時間: {elapsed}[/dim]")
+            if result.get("traceback"):
+                try:
+                    _log_f.write(f"[{elapsed}] TRACEBACK:\n{result['traceback']}\n")
+                except Exception:
+                    pass
         elif multi:
             lines = [
                 f"[bold]合計:[/bold] {result['total']}ファイル  "
@@ -190,6 +243,11 @@ def screen_translate():
                     lines.append(f"  [green]✓[/green] {cn} — {n}項目翻訳済み")
                 else:
                     lines.append(f"  [red]✗[/red] {cn}: {r.get('error', '?')}")
+                    if r.get("traceback"):
+                        try:
+                            _log_f.write(f"[{elapsed}] {cn} TRACEBACK:\n{r['traceback']}\n")
+                        except Exception:
+                            pass
             lines.append(f"[dim]処理時間: {elapsed}[/dim]")
             console.print(Panel("\n".join(lines), title="[bold]結果[/bold]", style="green"))
         else:
@@ -202,10 +260,28 @@ def screen_translate():
                 f"[dim]処理時間: {elapsed}[/dim]",
                 title="[bold]結果[/bold]", style="green",
             ))
-    except Exception as e:
+    except BaseException as e:
         elapsed = _fmt_elapsed()
-        console.print(f"[bold red]エラー:[/bold red] {e}")
+        tb_str = _tb.format_exc()
+        try:
+            _log_f.write(f"[{elapsed}] FATAL {type(e).__name__}: {e}\n{tb_str}\n")
+        except Exception:
+            pass
+        _write_crash(f"screen_translate {type(e).__name__}: {e}", tb_str)
+        console.print(f"[bold red]エラー ({type(e).__name__}):[/bold red] {e}")
         console.print(f"[dim]処理時間: {elapsed}[/dim]")
+        if not isinstance(e, Exception):
+            raise
+    finally:
+        # スリープ防止を解除
+        try:
+            ctypes.windll.kernel32.SetThreadExecutionState(_ES_CONTINUOUS)
+        except Exception:
+            pass
+        try:
+            _log_f.close()
+        except Exception:
+            pass
 
     _press_enter()
 
@@ -289,7 +365,21 @@ def screen_translate_local():
     console.rule("[dim]進捗[/dim]")
 
     from src.tools.translate_local import translate_local_file, translate_local_files
-    import time
+    import ctypes, time, traceback as _tb2
+    import datetime as _dt3
+
+    # 翻訳中はWindowsのスリープ・休止を防止する
+    _ES_CONTINUOUS2      = 0x80000000
+    _ES_SYSTEM_REQUIRED2 = 0x00000001
+    try:
+        ctypes.windll.kernel32.SetThreadExecutionState(_ES_CONTINUOUS2 | _ES_SYSTEM_REQUIRED2)
+    except Exception:
+        pass
+
+    os.makedirs("logs", exist_ok=True)
+    _log_path2 = f"logs/translate_local_{_dt3.datetime.now():%Y%m%d_%H%M%S}.log"
+    _log_f2    = open(_log_path2, "w", encoding="utf-8", buffering=1)
+    console.print(f"[dim]ログ → {_log_path2}[/dim]")
 
     t0 = time.monotonic()
 
@@ -300,6 +390,10 @@ def screen_translate_local():
     def _progress(msg: str):
         t_str    = _fmt_elapsed()
         is_error = msg.upper().startswith("ERROR") or "failed" in msg.lower()
+        try:
+            _log_f2.write(f"[{t_str}] {msg}\n")
+        except Exception:
+            pass
         if is_error:
             console.print(f"  [red][{t_str}] {msg}[/red]")
         else:
@@ -345,10 +439,27 @@ def screen_translate_local():
                 f"[dim]処理時間: {elapsed}[/dim]",
                 title="[bold]結果[/bold]", style="green",
             ))
-    except Exception as e:
+    except BaseException as e:
         elapsed = _fmt_elapsed()
-        console.print(f"[bold red]エラー:[/bold red] {e}")
+        tb_str2 = _tb2.format_exc()
+        try:
+            _log_f2.write(f"[{elapsed}] FATAL {type(e).__name__}: {e}\n{tb_str2}\n")
+        except Exception:
+            pass
+        _write_crash(f"screen_translate_local {type(e).__name__}: {e}", tb_str2)
+        console.print(f"[bold red]エラー ({type(e).__name__}):[/bold red] {e}")
         console.print(f"[dim]処理時間: {elapsed}[/dim]")
+        if not isinstance(e, Exception):
+            raise
+    finally:
+        try:
+            ctypes.windll.kernel32.SetThreadExecutionState(_ES_CONTINUOUS2)
+        except Exception:
+            pass
+        try:
+            _log_f2.close()
+        except Exception:
+            pass
 
     _press_enter()
 

@@ -16,7 +16,9 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 DIST = ROOT / "dist" / "LLM-Translator"
 
-APP_FILES = ["app.py", "engine.py", "app_config.py"]
+APP_FILES = ["ui.py", "config.py"]
+
+APP_DIRS = ["src"]
 
 PACKAGES = [
     "openai",
@@ -24,6 +26,10 @@ PACKAGES = [
     "python-docx",
     "rich",
     "json-repair",
+    "google-api-python-client",
+    "google-auth-httplib2",
+    "google-auth-oauthlib",
+    "python-dotenv",
 ]
 
 RUN_BAT = """\
@@ -31,12 +37,12 @@ RUN_BAT = """\
 cd /d "%~dp0"
 set PYTHONPATH=%~dp0packages
 
-:: py launcher で 3.9+ を優先、なければ python を使用
+:: py launcher で 3.11 を優先、なければ python を使用
 where py >nul 2>&1
 if not errorlevel 1 (
-    py -3.11 app.py %*
+    py -3.11 ui.py %*
 ) else (
-    python app.py %*
+    python ui.py %*
 )
 if errorlevel 1 pause
 """
@@ -64,28 +70,23 @@ def main():
     print(f"モード : {'完全再ビルド' if full else 'アプリのみ更新 (--full で完全再ビルド)'}")
 
     packages_dir = DIST / "packages"
-    has_packages = packages_dir.exists() and any(packages_dir.iterdir())
 
     if full:
         step("旧ビルドを削除中...")
         if DIST.exists():
             shutil.rmtree(DIST)
         packages_dir.mkdir(parents=True)
-        has_packages = False
-    else:
-        DIST.mkdir(parents=True, exist_ok=True)
-        packages_dir.mkdir(exist_ok=True)
 
-    if not has_packages:
-        step("パッケージをインストール中...")
-        run(
-            sys.executable, "-m", "pip", "install",
-            *PACKAGES,
-            "--target", str(packages_dir),
-            "--no-warn-script-location", "-q",
-        )
-    else:
-        step("パッケージはキャッシュ済み — スキップ")
+    DIST.mkdir(parents=True, exist_ok=True)
+    packages_dir.mkdir(exist_ok=True)
+
+    step("パッケージをインストール中 (未インストール分のみ)...")
+    run(
+        sys.executable, "-m", "pip", "install",
+        *PACKAGES,
+        "--target", str(packages_dir),
+        "--no-warn-script-location", "-q",
+    )
 
     step("アプリファイルをコピー中...")
     for name in APP_FILES:
@@ -96,12 +97,24 @@ def main():
         shutil.copy2(src, DIST / name)
         print(f"  コピー: {name}")
 
+    for dir_name in APP_DIRS:
+        src_dir = ROOT / dir_name
+        dst_dir = DIST / dir_name
+        if not src_dir.exists():
+            print(f"[ERROR] ディレクトリが見つかりません: {src_dir}")
+            sys.exit(1)
+        if dst_dir.exists():
+            shutil.rmtree(dst_dir)
+        shutil.copytree(src_dir, dst_dir)
+        print(f"  コピー: {dir_name}/")
+
     step("ランチャーを作成中...")
     (DIST / "run.bat").write_text(RUN_BAT, encoding="utf-8")
 
     print("\n" + "=" * 50)
     print(f" 完了: {DIST}")
     print(f" run.bat をダブルクリックして起動")
+    print(f" ※ Google Drive機能を使う場合は config/ フォルダを配置してください")
     print("=" * 50)
 
 

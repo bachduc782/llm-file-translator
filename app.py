@@ -89,24 +89,44 @@ def _setup_wizard():
     app_config.set_active_provider(provider)
 
     label = app_config.PROVIDERS[provider]["label"]
-    api_key = Prompt.ask(f"\n[bold]{label}[/bold] のAPIキーを入力してください", password=True)
-    app_config.set_api_key(provider, api_key)
+    current_key = app_config.get_api_key(provider)
+    masked = (current_key[:4] + "****" + current_key[-4:]) if len(current_key) > 8 else ""
+    prompt_key = f"\n[bold]{label}[/bold] APIキー"
+    if masked:
+        prompt_key += f" [dim](現在: {masked}、変更しない場合はEnter)[/dim]"
+    api_key = Prompt.ask(prompt_key, default=current_key)
+    if api_key.strip():
+        app_config.set_api_key(provider, api_key.strip())
 
     models = app_config.PROVIDERS[provider]["models"]
     console.print(f"\n利用可能なモデル ({label}):")
     for i, m in enumerate(models, 1):
         console.print(f"  [bold]{i}.[/bold] {m}")
+    console.print(f"  [bold]{len(models) + 1}.[/bold] [dim]その他（直接入力）[/dim]")
 
-    default_idx = models.index(app_config.PROVIDERS[provider]["default_model"]) + 1
+    current_model = app_config.get_model(provider)
+    try:
+        default_idx = str(models.index(current_model) + 1)
+    except ValueError:
+        default_idx = str(len(models) + 1)
+
     model_choice = Prompt.ask(
         "モデルを選択",
-        choices=[str(i) for i in range(1, len(models) + 1)],
-        default=str(default_idx),
+        choices=[str(i) for i in range(1, len(models) + 2)],
+        default=default_idx,
     )
-    app_config.set_model(provider, models[int(model_choice) - 1])
+    if int(model_choice) <= len(models):
+        selected_model = models[int(model_choice) - 1]
+    else:
+        selected_model = Prompt.ask(
+            "モデルIDを入力",
+            default=current_model,
+        ).strip()
+
+    app_config.set_model(provider, selected_model)
     app_config.save()
 
-    console.print(f"\n[green]✓ 設定を保存しました。[/green]")
+    console.print(f"\n[green]✓ 設定を保存しました。[/green] モデル: [cyan]{selected_model}[/cyan]")
 
 
 def _show_settings():

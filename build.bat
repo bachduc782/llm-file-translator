@@ -40,6 +40,11 @@ if errorlevel 1 (
     exit /b 1
 )
 
+:: SmartScreenブロック解除 (Zone.Identifier削除)
+echo.
+echo SmartScreenブロックを解除中...
+powershell -Command "Get-ChildItem -Path 'dist\LLM-Translator' -Recurse | Unblock-File"
+
 echo.
 echo ========================================
 echo  完了: dist\LLM-Translator\

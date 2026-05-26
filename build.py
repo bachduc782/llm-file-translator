@@ -2,12 +2,12 @@
 ビルドスクリプト — dist\LLM-Translator\ フォルダを生成する。
 
 使い方:
-    python build.py
+    python build.py          # アプリファイルのみ更新（packages再利用）
+    python build.py --full   # packages含め完全再ビルド
 """
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
@@ -39,32 +39,46 @@ def step(msg: str):
     print(f"\n>>> {msg}")
 
 
-def run(*args, **kwargs):
-    result = subprocess.run(args, **kwargs)
+def run(*args):
+    result = subprocess.run(args)
     if result.returncode != 0:
         print(f"[ERROR] コマンド失敗: {' '.join(str(a) for a in args)}")
         sys.exit(1)
 
 
 def main():
+    full = "--full" in sys.argv
+
     print("=" * 50)
     print(" LLM File Translator ビルド")
     print("=" * 50)
-    print(f"Python: {sys.executable}")
-    print(f"出力先: {DIST}")
+    print(f"Python : {sys.executable}")
+    print(f"出力先 : {DIST}")
+    print(f"モード : {'完全再ビルド' if full else 'アプリのみ更新 (--full で完全再ビルド)'}")
 
-    step("旧ビルドを削除中...")
-    if DIST.exists():
-        shutil.rmtree(DIST)
-    (DIST / "packages").mkdir(parents=True)
+    packages_dir = DIST / "packages"
+    has_packages = packages_dir.exists() and any(packages_dir.iterdir())
 
-    step("パッケージをインストール中...")
-    run(
-        sys.executable, "-m", "pip", "install",
-        *PACKAGES,
-        "--target", str(DIST / "packages"),
-        "--no-warn-script-location", "-q",
-    )
+    if full:
+        step("旧ビルドを削除中...")
+        if DIST.exists():
+            shutil.rmtree(DIST)
+        packages_dir.mkdir(parents=True)
+        has_packages = False
+    else:
+        DIST.mkdir(parents=True, exist_ok=True)
+        packages_dir.mkdir(exist_ok=True)
+
+    if not has_packages:
+        step("パッケージをインストール中...")
+        run(
+            sys.executable, "-m", "pip", "install",
+            *PACKAGES,
+            "--target", str(packages_dir),
+            "--no-warn-script-location", "-q",
+        )
+    else:
+        step("パッケージはキャッシュ済み — スキップ")
 
     step("アプリファイルをコピー中...")
     for name in APP_FILES:

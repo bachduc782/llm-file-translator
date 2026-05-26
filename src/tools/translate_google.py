@@ -14,7 +14,8 @@ from typing import Callable
 import config
 
 SCAN_ROW_BATCH  = 1000
-TRANSLATE_CHUNK = 20   # LLM呼び出し1回あたりのアイテム数
+TRANSLATE_CHUNK = 20   # LLM呼び出し1回あたりの最大アイテム数
+CHUNK_CHAR_MAX  = 2000 # 1チャンクあたりの最大文字数（長いセルの切り詰めを防ぐ）
 SHEET_WORKERS   = 40   # 並列LLMワーカー数 — レートリミッター（40回/分）が実際の制御者
 FILE_WORKERS    = 1    # 複数ファイルの並列処理数
 
@@ -23,7 +24,6 @@ Progress = Callable[[str], None]
 # このパターンに一致するセルは翻訳不要
 _RE_SKIP = re.compile(
     r'^[\d\s,.\-+%/()\[\]{}:;*|]+$'   # 数字・記号のみ
-    r'|^[A-Z0-9][A-Z0-9_.\-]{1,29}$'  # 大文字コード — TEST_001, NO-123
     r'|^https?://'                      # URL
     r'|^[a-zA-Z0-9._%+\-]+@\S+'        # メールアドレス
     r'|^\d{4}[-/]\d{2}[-/]\d{2}',      # ISO日付 — 2024-01-01
@@ -97,7 +97,7 @@ def _call_llm(prompt: str, retries: int = 3, on_retry=None) -> str:
             resp = client.chat.completions.create(
                 model=cfg["model"],
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=4096,
+                max_tokens=8192,
             )
             raw = (resp.choices[0].message.content or "").strip()
             if raw.startswith("```"):
@@ -169,6 +169,21 @@ def _col_letter(idx: int) -> str:
 def _chunks(items: list, size: int):
     for i in range(0, len(items), size):
         yield items[i : i + size]
+
+
+def _smart_chunks(cells: list[tuple]) -> list[list[tuple]]:
+    """アイテム数と文字数の両方を考慮してチャンクを分割する。"""
+    chunks, cur, cur_chars = [], [], 0
+    for cell in cells:
+        text = cell[3]
+        if cur and (len(cur) >= TRANSLATE_CHUNK or cur_chars + len(text) > CHUNK_CHAR_MAX):
+            chunks.append(cur)
+            cur, cur_chars = [], 0
+        cur.append(cell)
+        cur_chars += len(text)
+    if cur:
+        chunks.append(cur)
+    return chunks
 
 
 def _noop(*_): pass
@@ -248,7 +263,7 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
     lock       = threading.Lock()
     write_lock = threading.Lock()
     done       = 0
-    all_chunks   = list(_chunks(all_cells, TRANSLATE_CHUNK))
+    all_chunks   = _smart_chunks(all_cells)
     total_chunks = len(all_chunks)
 
     def _write_chunk(data: list, chunk_idx: int):

@@ -30,7 +30,14 @@ RUN_BAT = """\
 @echo off
 cd /d "%~dp0"
 set PYTHONPATH=%~dp0packages
-python app.py %*
+
+:: py launcher で 3.9+ を優先、なければ python を使用
+where py >nul 2>&1
+if not errorlevel 1 (
+    py -3.11 app.py %*
+) else (
+    python app.py %*
+)
 if errorlevel 1 pause
 """
 

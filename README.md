@@ -1,47 +1,46 @@
 # LLM File Translator
 
-Dịch tự động file Google Sheets, Google Docs, và file local (.xlsx, .docx, .txt) sang ngôn ngữ khác bằng LLM (AI).
+LLM（AI）を使って Google Sheets・Google Docs・ローカルファイル（.xlsx / .docx / .txt）を自動翻訳するツールです。
 
 ---
 
-## Tính năng
+## 機能
 
-- Dịch **Google Sheets** — toàn bộ sheet hoặc chỉ 1 sheet cụ thể
-- Dịch **Google Docs**
-- Dịch **file local**: `.xlsx`, `.docx`, `.txt`
-- Tự động **nhân bản file gốc** trước khi dịch (file gốc không bị ảnh hưởng)
-- Ghi kết quả dịch **ngay lập tức** theo từng chunk (không mất dữ liệu nếu bị gián đoạn)
-- Retry tự động không giới hạn khi bị rate limit (429)
-- Hỗ trợ nhiều LLM provider: **NVIDIA NIM**, **OpenRouter**
-
----
-
-## Yêu cầu
-
-- Python **3.11** trở lên (khuyến nghị 3.11 hoặc 3.12, không dùng 3.14 beta)
-- Tài khoản Google (để dịch Google Drive files)
-- API key của LLM provider
+- **Google Sheets** の翻訳 — 全シートまたは特定シートのみ
+- **Google Docs** の翻訳
+- **ローカルファイル** の翻訳 — `.xlsx`、`.docx`、`.txt`
+- 翻訳前にファイルを**自動複製**（元ファイルは変更なし）
+- チャンクごとに**即時書き込み**（途中終了してもデータ損失なし）
+- レート制限（429）時は**無制限自動リトライ**
+- 対応 LLM プロバイダー：**NVIDIA NIM**、**OpenRouter**
 
 ---
 
-## Cài đặt
+## 動作要件
 
-### 1. Tạo virtual environment
+- Python **3.11** 以上（3.11 または 3.12 推奨。3.14 beta は不可）
+- Google アカウント（Google Drive ファイルを翻訳する場合）
+- LLM プロバイダーの API キー
+
+---
+
+## インストール
+
+### 1. 仮想環境の作成
 
 ```powershell
-# Dùng Python 3.11
 C:\Users\<username>\AppData\Local\Programs\Python\Python311\python.exe -m venv C:\venv\llm-file-translator
 ```
 
-### 2. Cài dependencies
+### 2. 依存パッケージのインストール
 
 ```powershell
 C:\venv\llm-file-translator\Scripts\pip.exe install -r requirements.txt
 ```
 
-### 3. Chạy ứng dụng
+### 3. 起動
 
-Bấm đúp `run.bat`, hoặc:
+`run.bat` をダブルクリック、または：
 
 ```powershell
 C:\venv\llm-file-translator\Scripts\python.exe ui.py
@@ -49,75 +48,75 @@ C:\venv\llm-file-translator\Scripts\python.exe ui.py
 
 ---
 
-## Thiết lập lần đầu
+## 初回セットアップ
 
-Lần đầu chạy sẽ hiện wizard tự động:
+初回起動時にウィザードが自動表示されます。
 
-### Bước 1 — Chọn LLM Provider
+### ステップ 1 — LLM プロバイダーを選択
 
-| Provider | Đặc điểm |
+| プロバイダー | 特徴 |
 |---|---|
-| **NVIDIA NIM** | Tốc độ cao, rate limit 40 req/min |
-| **OpenRouter** | Nhiều model, có free tier (20 req/min) |
+| **NVIDIA NIM** | 高速、レート上限 40 req/min |
+| **OpenRouter** | 多数のモデル対応、無料枠あり（20 req/min） |
 
-### Bước 2 — Nhập API Key
+### ステップ 2 — API キーを入力
 
-- **NVIDIA NIM**: lấy tại [build.nvidia.com](https://build.nvidia.com) → Get API Key
-- **OpenRouter**: lấy tại [openrouter.ai/keys](https://openrouter.ai/keys)
+- **NVIDIA NIM**：[build.nvidia.com](https://build.nvidia.com) → Get API Key
+- **OpenRouter**：[openrouter.ai/keys](https://openrouter.ai/keys)
 
-### Bước 3 — Chọn model
+### ステップ 3 — モデルを選択
 
-Chọn từ danh sách hoặc nhập model ID tùy chỉnh.
+一覧から選択するか、モデル ID を直接入力。
 
-> Cài đặt được lưu vào file `.env` và sẽ nhớ cho các lần chạy sau.
-
----
-
-## Thiết lập Google OAuth (cho Google Drive)
-
-Cần thực hiện **1 lần duy nhất**:
-
-1. Vào menu **[1] Google認証 (Auth Setup)**
-2. Trình duyệt sẽ mở ra → đăng nhập Google → cấp quyền
-3. Token được lưu tại `config/google_token.json`
-
-> Cần có file `config/google_credentials.json` (OAuth 2.0 credentials từ Google Cloud Console) trước khi thực hiện bước này.
+> 設定は `.env` ファイルに保存され、次回以降も引き継がれます。
 
 ---
 
-## Cách sử dụng
+## Google OAuth 設定（Google Drive を使う場合）
 
-### Dịch Google Sheets / Docs
+**初回のみ**実施が必要です。
 
-1. Chọn **[2] Googleファイルを翻訳**
-2. Dán URL hoặc File ID của file Google (1 dòng 1 file), Enter trống để kết thúc
-3. Nhập ngôn ngữ đích (mặc định: `Japanese`)
-4. Nhập tên sheet cụ thể nếu muốn (để trống = dịch tất cả sheet)
+1. メニュー **[1] Google認証 (Auth Setup)** を選択
+2. ブラウザが開くので Google アカウントでログイン → アクセスを許可
+3. トークンが `config/google_token.json` に保存されます
 
-**Ví dụ URL hợp lệ:**
+> 事前に Google Cloud Console で発行した OAuth 2.0 認証情報ファイル `config/google_credentials.json` が必要です。
+
+---
+
+## 使い方
+
+### Google Sheets / Docs を翻訳する
+
+1. **[2] Googleファイルを翻訳** を選択
+2. Google ファイルの URL または File ID を1行ずつ入力し、空行で確定
+3. 翻訳先言語を入力（デフォルト：`Japanese`）
+4. シート名を入力（空白 = 全シート翻訳）
+
+**使用可能な URL の例：**
 ```
 https://docs.google.com/spreadsheets/d/1ABC.../edit
 https://docs.google.com/document/d/1XYZ.../edit
 ```
 
-File clone sẽ được tạo trong cùng thư mục với tên gốc + suffix ngôn ngữ:
+翻訳結果は元ファイルと同じフォルダに言語サフィックス付きで複製されます：
 ```
-MyFile.xlsx  →  MyFile-jp.xlsx
+MyFile  →  MyFile-jp
 ```
 
-### Dịch file local (.xlsx / .docx / .txt)
+### ローカルファイル（.xlsx / .docx / .txt）を翻訳する
 
-1. Chọn **[3] ローカルファイルを翻訳**
-2. Chọn file qua dialog hoặc nhập đường dẫn thủ công
-3. Nhập ngôn ngữ đích và tên sheet (nếu là .xlsx)
+1. **[3] ローカルファイルを翻訳** を選択
+2. ファイル選択ダイアログ、またはパスを手動入力
+3. 翻訳先言語とシート名（.xlsx の場合）を入力
 
 ---
 
-## Ngôn ngữ hỗ trợ
+## 対応言語
 
-Nhập tên ngôn ngữ bằng tiếng Anh. Một số ví dụ:
+言語名は英語で入力します。主な例：
 
-| Tên nhập | Suffix file |
+| 入力名 | ファイルサフィックス |
 |---|---|
 | `Japanese` | `-jp` |
 | `Vietnamese` | `-vn` |
@@ -125,50 +124,52 @@ Nhập tên ngôn ngữ bằng tiếng Anh. Một số ví dụ:
 | `Korean` | `-ko` |
 | `Chinese` | `-zh` |
 | `Thai` | `-th` |
+| `Indonesian` | `-id` |
+| `French` | `-fr` |
 
 ---
 
-## Cell/nội dung không được dịch
+## 翻訳スキップの対象
 
-Các nội dung sau bị bỏ qua (không gửi lên LLM):
+以下の内容は LLM に送信せず、翻訳をスキップします：
 
-| Loại | Ví dụ |
+| 種別 | 例 |
 |---|---|
-| Ký tự quá ngắn (≤ 2) | `OK`, `No`, `ID` |
-| Chỉ toàn số/ký hiệu | `123`, `36-11`, `100%` |
-| Công thức Sheets | `=SUM(A1:A10)` |
+| 2文字以下 | `OK`、`No`、`ID` |
+| 数字・記号のみ | `123`、`36-11`、`100%` |
+| Sheets の数式 | `=SUM(A1:A10)` |
 | URL | `https://example.com` |
-| Email | `user@example.com` |
-| Ngày dạng ISO | `2024-01-01` |
+| メールアドレス | `user@example.com` |
+| ISO 日付形式 | `2024-01-01` |
 
 ---
 
-## Log
+## ログ
 
-Mỗi lần chạy tạo 1 file log trong thư mục `logs/`:
+実行のたびに `logs/` フォルダにログファイルが生成されます：
 
 ```
 logs/
-  translate_20260525_211323.log   ← log từng lần dịch Google
-  translate_local_20260526_...log ← log từng lần dịch local
-  crash.log                       ← crash không bắt được (nếu có)
+  translate_20260525_211323.log      ← Google ファイル翻訳ログ
+  translate_local_20260526_....log   ← ローカルファイル翻訳ログ
+  crash.log                          ← 予期しないクラッシュログ（発生時のみ）
 ```
 
-Log ghi timestamp, tiến độ từng chunk, lỗi kèm traceback đầy đủ.
+ログにはタイムスタンプ、チャンクごとの進捗、エラー発生時のトレースバックが記録されます。
 
 ---
 
-## Cài đặt LLM (menu [5])
+## LLM 設定の変更
 
-Có thể đổi provider, API key, model bất kỳ lúc nào qua menu **[5] LLMプロバイダー設定**.
+プロバイダー・API キー・モデルはいつでも **[5] LLMプロバイダー設定** メニューから変更できます。
 
 ---
 
-## Xử lý lỗi thường gặp
+## よくあるエラーと対処法
 
-| Lỗi | Nguyên nhân | Cách xử lý |
+| エラー | 原因 | 対処 |
 |---|---|---|
-| `429 Too Many Requests` | Vượt rate limit LLM | Tự động retry, không cần làm gì |
-| `Google token not found` | Chưa xác thực Google | Chạy menu [1] Auth Setup |
-| `File not accessible` | Không có quyền truy cập file | Kiểm tra quyền chia sẻ Google Drive |
-| Process tự dừng | Heap corruption (Python 3.14) | Dùng Python 3.11 + `run.bat` |
+| `429 Too Many Requests` | LLM レート制限超過 | 自動リトライのため操作不要 |
+| `Googleトークンが見つかりません` | Google 認証未実施 | メニュー [1] Auth Setup を実行 |
+| `ファイルにアクセスできません` | Google Drive の権限不足 | ファイルの共有設定を確認 |
+| プロセスが突然終了する | Python 3.14 のヒープ破損 | Python 3.11 + `run.bat` を使用 |

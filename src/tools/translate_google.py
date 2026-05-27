@@ -77,26 +77,64 @@ def _get_limiter() -> _RateLimiter:
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
-def _split_and_translate(text: str, target_language: str, on_retry=None) -> str:
-    """長すぎるセルを段落単位で分割して翻訳し、結合して返す。"""
-    lines = text.split('\n')
-    sub_chunks: list[list[str]] = []
-    cur: list[str] = []
-    cur_len = 0
-    for line in lines:
-        if cur and cur_len + len(line) + 1 > CHUNK_CHAR_MAX:
-            sub_chunks.append(cur)
-            cur, cur_len = [], 0
-        cur.append(line)
-        cur_len += len(line) + 1
-    if cur:
-        sub_chunks.append(cur)
+_RE_SENTENCE_END = re.compile(
+    r'(?<=[。！？])'
+    r'|(?<=[\.!\?]) +'
+)
 
-    result_lines: list[str] = []
-    for sub_chunk in sub_chunks:
-        translated = _translate_list(sub_chunk, target_language, on_retry=on_retry)
-        result_lines.extend(translated)
-    return '\n'.join(result_lines)
+
+def _smart_split_text(text: str, max_chars: int) -> list[str]:
+    if len(text) <= max_chars:
+        return [text]
+
+    for sep in ('\n\n', '\n'):
+        if sep in text:
+            return _merge_segments(text.split(sep), sep, max_chars)
+
+    parts = [p for p in _RE_SENTENCE_END.split(text) if p]
+    if len(parts) > 1:
+        return _merge_segments(parts, '', max_chars)
+
+    pos = text.rfind(' ', 0, max_chars)
+    if pos > 0:
+        return [text[:pos]] + _smart_split_text(text[pos + 1:], max_chars)
+
+    return [text[:max_chars]] + _smart_split_text(text[max_chars:], max_chars)
+
+
+def _merge_segments(parts: list[str], sep: str, max_chars: int) -> list[str]:
+    chunks, cur = [], ''
+    for part in parts:
+        candidate = (cur + sep + part) if cur else part
+        if len(candidate) <= max_chars:
+            cur = candidate
+        else:
+            if cur:
+                chunks.append(cur)
+            if len(part) > max_chars:
+                sub = _smart_split_text(part, max_chars)
+                chunks.extend(sub[:-1])
+                cur = sub[-1] if sub else ''
+            else:
+                cur = part
+    if cur:
+        chunks.append(cur)
+    return chunks or [text[:max_chars] for text in parts[:1]]
+
+
+def _split_and_translate(text: str, target_language: str, on_retry=None) -> str:
+    segments = _smart_split_text(text, CHUNK_CHAR_MAX)
+    translated_segments = []
+    for seg in segments:
+        result = _translate_list([seg], target_language, on_retry=on_retry)
+        translated_segments.append(result[0] if result else seg)
+    if '\n\n' in text:
+        sep = '\n\n'
+    elif '\n' in text:
+        sep = '\n'
+    else:
+        sep = ' '
+    return sep.join(translated_segments)
 
 
 def _estimate_max_tokens(items: list[str]) -> int:

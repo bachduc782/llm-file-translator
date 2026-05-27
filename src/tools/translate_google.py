@@ -261,62 +261,62 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
     if not all_cells:
         return 0
 
-    # ── フェーズ2+3：翻訳して即座に書き戻し ──────────────────────────────────
-    lock       = threading.Lock()
-    write_lock = threading.Lock()
+    # ── フェーズ2：ユニークテキストのみ翻訳 ──────────────────────────────────
+    unique_texts = list(dict.fromkeys(t for _, _, _, t in all_cells))
+    dupes        = len(all_cells) - len(unique_texts)
+    if dupes:
+        progress(f"{len(unique_texts)}件のユニークテキストを翻訳 ({dupes}件重複スキップ)")
+
+    cache: dict[str, str] = {}
+    cache_lock = threading.Lock()
     done       = 0
-    all_chunks   = _smart_chunks(all_cells)
+    all_chunks   = _smart_chunks([(i, t) for i, t in enumerate(unique_texts)])
     total_chunks = len(all_chunks)
 
-    def _write_chunk(data: list, chunk_idx: int):
-        """チャンクの翻訳結果を即座にSheetsへ書き込む（リトライ付き）。"""
-        if not data:
-            return
-        with write_lock:
-            for attempt in range(3):
-                try:
-                    svc.spreadsheets().values().batchUpdate(
-                        spreadsheetId=sid,
-                        body={"valueInputOption": "RAW", "data": data},
-                    ).execute()
-                    return
-                except Exception as e:
-                    if attempt < 2:
-                        time.sleep(2 ** attempt)
-                    else:
-                        progress(f"  書き込みエラー [{chunk_idx}/{total_chunks}]: {e}")
-
-    def _worker(chunk: list[tuple[str, int, int, str]], idx: int):
+    def _translate_worker(chunk: list, idx: int):
         nonlocal done
-        progress(f"[{idx}/{total_chunks}] LLMを呼び出し中 ({len(chunk)}セル)…")
+        progress(f"[{idx}/{total_chunks}] LLMを呼び出し中 ({len(chunk)}件)…")
 
         def _on_retry(attempt, total, exc, wait):
             progress(f"リトライ [{idx}/{total_chunks}] 試行 {attempt}/{total} (待機 {wait}秒) — {exc}")
 
-        texts      = [t for _, _, _, t in chunk]
-        translated = _translate_list(texts, target_language, on_retry=_on_retry)
-
-        write_data = [
-            {"range": f"'{sn}'!{_col_letter(c)}{r + 1}", "values": [[new]]}
-            for (sn, r, c, orig), new in zip(chunk, translated)
-            if orig != new
-        ]
-        with lock:
+        translated = _translate_list([t for _, t in chunk], target_language, on_retry=_on_retry)
+        with cache_lock:
+            for (_, orig), new in zip(chunk, translated):
+                cache[orig] = new
             done += len(chunk)
-            progress(f"[{idx}/{total_chunks}] 完了 — {done}/{len(all_cells)}セル翻訳済み")
-
-        _write_chunk(write_data, idx)
+            progress(f"[{idx}/{total_chunks}] 完了 — {done}/{len(unique_texts)}件翻訳済み")
 
     with ThreadPoolExecutor(max_workers=SHEET_WORKERS) as pool:
-        futures = {
-            pool.submit(_worker, chunk, i + 1): i
-            for i, chunk in enumerate(all_chunks)
-        }
+        futures = {pool.submit(_translate_worker, chunk, i + 1): i for i, chunk in enumerate(all_chunks)}
         for fut in as_completed(futures):
             try:
                 fut.result()
             except Exception as e:
                 progress(f"ERROR チャンク {futures[fut] + 1}: {e}")
+
+    # ── フェーズ3：一括書き戻し ───────────────────────────────────────────────
+    write_data = [
+        {"range": f"'{sn}'!{_col_letter(c)}{r + 1}", "values": [[cache[orig]]]}
+        for sn, r, c, orig in all_cells
+        if cache.get(orig, orig) != orig
+    ]
+    progress(f"{len(write_data)}セルを書き戻し中…")
+    write_lock = threading.Lock()
+    for batch in _chunks(write_data, 500):
+        for attempt in range(3):
+            try:
+                with write_lock:
+                    svc.spreadsheets().values().batchUpdate(
+                        spreadsheetId=sid,
+                        body={"valueInputOption": "RAW", "data": batch},
+                    ).execute()
+                break
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                else:
+                    progress(f"  書き込みエラー: {e}")
 
     return len(all_cells)
 

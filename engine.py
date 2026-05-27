@@ -188,6 +188,49 @@ def _translate_list(items: list[str], target_language: str, on_retry=None) -> li
     return (result + items[len(result):])[:len(items)]
 
 
+# ── 重複排除翻訳 ──────────────────────────────────────────────────────────────
+
+def _translate_unique(
+    texts: list[str],
+    target_language: str,
+    progress: Progress,
+) -> dict[str, str]:
+    """重複を排除してから翻訳し、{原文: 訳文} のキャッシュを返す。"""
+    unique = list(dict.fromkeys(texts))
+    dupes  = len(texts) - len(unique)
+    if dupes:
+        progress(f"{len(unique)}件のユニークテキストを翻訳 ({dupes}件重複スキップ)")
+
+    cache: dict[str, str] = {}
+    lock         = threading.Lock()
+    done         = 0
+    all_chunks   = _smart_chunks([(i, t) for i, t in enumerate(unique)])
+    total_chunks = len(all_chunks)
+
+    def _worker(chunk: list, idx: int):
+        nonlocal done
+
+        def _on_retry(attempt, total_r, exc, wait):
+            progress(f"リトライ [{idx}/{total_chunks}] 試行 {attempt}/{total_r} (待機 {wait}秒) — {exc}")
+
+        translated = _translate_list([t for _, t in chunk], target_language, on_retry=_on_retry)
+        with lock:
+            for (_, orig), new in zip(chunk, translated):
+                cache[orig] = new
+            done += len(chunk)
+            progress(f"[{idx}/{total_chunks}] 完了 — {done}/{len(unique)}件翻訳済み")
+
+    with ThreadPoolExecutor(max_workers=LOCAL_WORKERS) as pool:
+        futures = {pool.submit(_worker, chunk, i + 1): i for i, chunk in enumerate(all_chunks)}
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception as e:
+                progress(f"ERROR チャンク {futures[fut] + 1}: {e}")
+
+    return cache
+
+
 # ── ファイル名生成 ─────────────────────────────────────────────────────────────
 
 def _clone_path(file_path: str, target_language: str) -> str:
@@ -229,35 +272,12 @@ def _translate_xlsx(file_path: str, sheet_name: str, target_language: str, progr
     if not all_cells:
         return 0
 
-    translated_map: dict[tuple[str, int, int], str] = {}
-    lock         = threading.Lock()
-    done         = 0
-    all_chunks   = _smart_chunks(all_cells)
-    total_chunks = len(all_chunks)
-
-    def _worker(chunk: list, idx: int):
-        nonlocal done
-        progress(f"[{idx}/{total_chunks}] LLMを呼び出し中 ({len(chunk)}セル)…")
-
-        def _on_retry(attempt, total_r, exc, wait):
-            progress(f"リトライ [{idx}/{total_chunks}] 試行 {attempt}/{total_r} (待機 {wait}秒) — {exc}")
-
-        texts      = [t for _, _, _, t in chunk]
-        translated = _translate_list(texts, target_language, on_retry=_on_retry)
-        with lock:
-            for (sn, r, c, orig), new in zip(chunk, translated):
-                if orig != new:
-                    translated_map[(sn, r, c)] = new
-            done += len(chunk)
-            progress(f"[{idx}/{total_chunks}] 完了 — {done}/{len(all_cells)}セル翻訳済み")
-
-    with ThreadPoolExecutor(max_workers=LOCAL_WORKERS) as pool:
-        futures = {pool.submit(_worker, chunk, i + 1): i for i, chunk in enumerate(all_chunks)}
-        for fut in as_completed(futures):
-            try:
-                fut.result()
-            except Exception as e:
-                progress(f"ERROR チャンク {futures[fut] + 1}: {e}")
+    cache = _translate_unique([t for _, _, _, t in all_cells], target_language, progress)
+    translated_map = {
+        (sn, r, c): cache[orig]
+        for sn, r, c, orig in all_cells
+        if cache.get(orig, orig) != orig
+    }
 
     for (sn, r, c), new in translated_map.items():
         wb[sn].cell(row=r, column=c).value = new
@@ -301,39 +321,12 @@ def _translate_docx(file_path: str, target_language: str, progress: Progress) ->
     if not total:
         return 0
 
-    translated_results: dict[int, str] = {}
-    lock         = threading.Lock()
-    done         = 0
-    indexed      = [(i, text) for i, (_, text) in enumerate(para_items)]
-    all_chunks   = _smart_chunks(indexed)
-    total_chunks = len(all_chunks)
+    cache = _translate_unique([text for _, text in para_items], target_language, progress)
 
-    def _worker(chunk: list, idx: int):
-        nonlocal done
-        progress(f"[{idx}/{total_chunks}] LLMを呼び出し中 ({len(chunk)}段落)…")
-
-        def _on_retry(attempt, total_r, exc, wait):
-            progress(f"リトライ [{idx}/{total_chunks}] 試行 {attempt}/{total_r} (待機 {wait}秒) — {exc}")
-
-        texts      = [t for _, t in chunk]
-        translated = _translate_list(texts, target_language, on_retry=_on_retry)
-        with lock:
-            for (i, orig), new in zip(chunk, translated):
-                if orig != new:
-                    translated_results[i] = new
-            done += len(chunk)
-            progress(f"[{idx}/{total_chunks}] 完了 — {done}/{total}段落翻訳済み")
-
-    with ThreadPoolExecutor(max_workers=LOCAL_WORKERS) as pool:
-        futures = {pool.submit(_worker, chunk, i + 1): i for i, chunk in enumerate(all_chunks)}
-        for fut in as_completed(futures):
-            try:
-                fut.result()
-            except Exception as e:
-                progress(f"ERROR チャンク {futures[fut] + 1}: {e}")
-
-    for i, new_text in translated_results.items():
-        _set_para_text(para_items[i][0], new_text)
+    for i, (para, orig) in enumerate(para_items):
+        new = cache.get(orig, orig)
+        if orig != new:
+            _set_para_text(para, new)
 
     progress("ファイルを保存中…")
     doc.save(file_path)
@@ -356,39 +349,13 @@ def _translate_txt(file_path: str, target_language: str, progress: Progress) -> 
     if not total:
         return 0
 
-    translated_map: dict[int, str] = {}
-    lock         = threading.Lock()
-    done         = 0
-    all_chunks   = _smart_chunks(indexed)
-    total_chunks = len(all_chunks)
-
-    def _worker(chunk: list, idx: int):
-        nonlocal done
-        progress(f"[{idx}/{total_chunks}] LLMを呼び出し中 ({len(chunk)}行)…")
-
-        def _on_retry(attempt, total_r, exc, wait):
-            progress(f"リトライ [{idx}/{total_chunks}] 試行 {attempt}/{total_r} (待機 {wait}秒) — {exc}")
-
-        texts      = [t for _, t in chunk]
-        translated = _translate_list(texts, target_language, on_retry=_on_retry)
-        with lock:
-            for (i, _), new in zip(chunk, translated):
-                translated_map[i] = new
-            done += len(chunk)
-            progress(f"[{idx}/{total_chunks}] 完了 — {done}/{total}行翻訳済み")
-
-    with ThreadPoolExecutor(max_workers=LOCAL_WORKERS) as pool:
-        futures = {pool.submit(_worker, chunk, i + 1): i for i, chunk in enumerate(all_chunks)}
-        for fut in as_completed(futures):
-            try:
-                fut.result()
-            except Exception as e:
-                progress(f"ERROR チャンク {futures[fut] + 1}: {e}")
+    cache = _translate_unique([t for _, t in indexed], target_language, progress)
 
     result_lines = list(lines)
-    for i, new_text in translated_map.items():
-        orig    = lines[i]
-        ending  = "\r\n" if orig.endswith("\r\n") else "\n"
+    for i, orig_text in indexed:
+        new_text = cache.get(orig_text, orig_text)
+        orig     = lines[i]
+        ending   = "\r\n" if orig.endswith("\r\n") else "\n"
         result_lines[i] = new_text + ending
 
     progress("ファイルを保存中…")

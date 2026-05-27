@@ -160,14 +160,19 @@ def _merge_segments(parts: list[str], sep: str, max_chars: int) -> list[str]:
     return chunks or [text[:max_chars] for text in parts[:1]]
 
 
+_OVERLAP_CHARS = 200  # 前チャンクからコンテキストとして渡す文字数
+
+
 def _split_and_translate(text: str, target_language: str, on_retry=None) -> str:
     """長すぎるセルを意味的な境界で分割して翻訳し、結合して返す。"""
     segments = _smart_split_text(text, CHUNK_CHAR_MAX)
     translated_segments = []
+    prev_original = ''
     for seg in segments:
-        result = _translate_list([seg], target_language, on_retry=on_retry)
+        context = prev_original[-_OVERLAP_CHARS:] if prev_original else ''
+        result = _translate_list([seg], target_language, on_retry=on_retry, context=context)
         translated_segments.append(result[0] if result else seg)
-    # 元の区切り文字を推定して結合
+        prev_original = seg
     if '\n\n' in text:
         sep = '\n\n'
     elif '\n' in text:
@@ -232,9 +237,14 @@ def _call_llm(prompt: str, retries: int = 3, max_tokens: int = 8192, on_retry=No
             attempt += 1
 
 
-def _translate_list(items: list[str], target_language: str, on_retry=None) -> list[str]:
+def _translate_list(items: list[str], target_language: str, on_retry=None, context: str = '') -> list[str]:
     max_tokens = _estimate_max_tokens(items)
+    context_hint = (
+        f"[Preceding context for reference only — do not translate this line: ...{context}]\n\n"
+        if context else ''
+    )
     prompt = (
+        f"{context_hint}"
         f"Translate the following list of text items to {target_language}.\n"
         "Rules:\n"
         "- Translate ALL natural language text, including single words and short phrases.\n"

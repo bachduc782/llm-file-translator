@@ -128,8 +128,9 @@ def _translate_list(items: list[str], target_language: str, on_retry=None) -> li
     prompt = (
         f"Translate the following list of text items to {target_language}.\n"
         "Rules:\n"
-        "- Translate ALL text items.\n"
-        "- KEEP AS-IS: proper nouns, codes, numbers, URLs, empty strings.\n"
+        "- Translate ALL text items including status words (e.g. PASS, FAIL, OK, YES, NO, ERROR).\n"
+        "- KEEP AS-IS: proper nouns, URLs, email addresses, numbers, and technical identifiers"
+        " that contain underscores or mixed alphanumeric patterns (e.g. USER_ID, ABC_123, v1.0).\n"
         "- Preserve EXACT list length — one output per input.\n"
         "- Return ONLY valid JSON array of strings, no explanation, no markdown.\n\n"
         f"Input:\n{json.dumps(items, ensure_ascii=False)}"

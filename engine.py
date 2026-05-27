@@ -110,7 +110,15 @@ def _get_limiter() -> _RateLimiter:
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
-def _call_llm(prompt: str, retries: int = 3, on_retry=None) -> str:
+def _estimate_max_tokens(items: list[str]) -> int:
+    """入力文字数から必要な max_tokens を推定する。"""
+    total_chars = sum(len(s) for s in items)
+    # 翻訳後の文字数 ≒ 入力の1.2倍、3文字/トークン換算 + 512バッファ
+    estimated = int(total_chars / 3 * 1.2) + 512
+    return max(4096, min(estimated, 32768))
+
+
+def _call_llm(prompt: str, retries: int = 3, max_tokens: int = 8192, on_retry=None) -> str:
     from openai import OpenAI
 
     cfg    = app_config.get_llm_config()
@@ -131,7 +139,7 @@ def _call_llm(prompt: str, retries: int = 3, on_retry=None) -> str:
             resp = client.chat.completions.create(
                 model=cfg["model"],
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=8192,
+                max_tokens=max_tokens,
             )
             raw = (resp.choices[0].message.content or "").strip()
             if raw.startswith("```"):
@@ -158,6 +166,7 @@ def _call_llm(prompt: str, retries: int = 3, on_retry=None) -> str:
 
 
 def _translate_list(items: list[str], target_language: str, on_retry=None) -> list[str]:
+    max_tokens = _estimate_max_tokens(items)
     prompt = (
         f"Translate the following list of text items to {target_language}.\n"
         "Rules:\n"
@@ -169,7 +178,7 @@ def _translate_list(items: list[str], target_language: str, on_retry=None) -> li
         "- Return ONLY valid JSON array of strings, no explanation, no markdown.\n\n"
         f"Input:\n{json.dumps(items, ensure_ascii=False)}"
     )
-    raw = _call_llm(prompt, on_retry=on_retry)
+    raw = _call_llm(prompt, max_tokens=max_tokens, on_retry=on_retry)
     if not raw.strip():
         return items
     try:

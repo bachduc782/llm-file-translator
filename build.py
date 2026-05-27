@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -48,6 +50,14 @@ if errorlevel 1 pause
 """
 
 
+def _force_remove(path: Path):
+    """読み取り専用ファイルも含めて強制削除（Windows対応）。"""
+    def _on_error(func, fpath, _):
+        os.chmod(fpath, stat.S_IWRITE)
+        func(fpath)
+    shutil.rmtree(path, onerror=_on_error)
+
+
 def step(msg: str):
     print(f"\n>>> {msg}")
 
@@ -74,7 +84,7 @@ def main():
     if full:
         step("旧ビルドを削除中...")
         if DIST.exists():
-            shutil.rmtree(DIST)
+            _force_remove(DIST)
         packages_dir.mkdir(parents=True)
 
     DIST.mkdir(parents=True, exist_ok=True)
@@ -104,7 +114,7 @@ def main():
             print(f"[ERROR] ディレクトリが見つかりません: {src_dir}")
             sys.exit(1)
         if dst_dir.exists():
-            shutil.rmtree(dst_dir)
+            _force_remove(dst_dir)
         shutil.copytree(src_dir, dst_dir)
         print(f"  コピー: {dir_name}/")
 

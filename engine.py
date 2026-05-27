@@ -229,6 +229,44 @@ def _call_llm(prompt: str, retries: int = 3, max_tokens: int = 8192, on_retry=No
             time.sleep(wait)
 
 
+def _translate_single(text: str, target_language: str, on_retry=None) -> str:
+    """JSONを使わずに1テキストを翻訳する（JSON失敗時のフォールバック）。"""
+    prompt = (
+        f"Translate the following text to {target_language}.\n"
+        "Rules:\n"
+        "- Translate ALL natural language text, including single words and short phrases.\n"
+        "- KEEP AS-IS only items that are NOT natural language: URLs, email addresses, numbers,"
+        " and technical tokens (identifiers containing underscores, camelCase, version strings like v1.0,"
+        " or mixed letter-digit patterns like ABC123).\n"
+        "Output ONLY the translated text, no explanation.\n\n"
+        f"{text}"
+    )
+    result = _call_llm(prompt, max_tokens=_estimate_max_tokens([text]), on_retry=on_retry)
+    return result if result.strip() else text
+
+
+def _parse_llm_list(raw: str, items: list[str]) -> list[str] | None:
+    """LLMレスポンスをリストとして解析。失敗時はNoneを返す。不足分は元テキストで補完。"""
+    if not raw.strip():
+        return None
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError:
+        from json_repair import repair_json
+        repaired = repair_json(raw)
+        if not repaired or repaired in ("null", "[]", "{}"):
+            return None
+        try:
+            result = json.loads(repaired)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(result, list) or len(result) == 0:
+        return None
+    n = len(items)
+    # 不足分は元テキストで補完（空文字列でセルを上書きしない）
+    return [(result[i] if i < len(result) and result[i] else items[i]) for i in range(n)]
+
+
 def _translate_list(items: list[str], target_language: str, on_retry=None, context: str = '') -> list[str]:
     max_tokens = _estimate_max_tokens(items)
     context_hint = (
@@ -247,23 +285,20 @@ def _translate_list(items: list[str], target_language: str, on_retry=None, conte
         "- Return ONLY valid JSON array of strings, no explanation, no markdown.\n\n"
         f"Input:\n{json.dumps(items, ensure_ascii=False)}"
     )
-    raw = _call_llm(prompt, max_tokens=max_tokens, on_retry=on_retry)
-    if not raw.strip():
-        return items
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError:
-        from json_repair import repair_json
-        repaired = repair_json(raw)
-        if not repaired or repaired in ("null", "[]", "{}"):
-            return items
-        try:
-            result = json.loads(repaired)
-        except json.JSONDecodeError:
-            return items
-    if not isinstance(result, list):
-        return items
-    return (result + items[len(result):])[:len(items)]
+
+    for fmt_attempt in range(3):
+        raw = _call_llm(prompt, max_tokens=max_tokens, on_retry=on_retry)
+        result = _parse_llm_list(raw, items)
+        if result is not None:
+            return result
+        if on_retry:
+            on_retry(fmt_attempt + 1, 3, "JSON形式エラー — 再試行中", 1)
+        time.sleep(1)
+
+    # JSONが3回失敗 → 1件ずつプレーンテキストで翻訳
+    if on_retry:
+        on_retry(3, 3, f"JSON形式エラーが続くため{len(items)}件を個別翻訳に切り替えます", 0)
+    return [_translate_single(item, target_language, on_retry) for item in items]
 
 
 # ── 重複排除翻訳 ──────────────────────────────────────────────────────────────

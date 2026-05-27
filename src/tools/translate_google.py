@@ -14,8 +14,9 @@ from typing import Callable
 import config
 
 SCAN_ROW_BATCH  = 1000
-TRANSLATE_CHUNK = 20   # LLM呼び出し1回あたりの最大アイテム数
-CHUNK_CHAR_MAX  = 2000 # 1チャンクあたりの最大文字数（長いセルの切り詰めを防ぐ）
+TRANSLATE_CHUNK      = 20   # LLM呼び出し1回あたりの最大アイテム数
+CHUNK_CHAR_MAX       = 2000 # 1チャンクあたりの最大文字数
+CELL_SPLIT_THRESHOLD = 2000 # これを超えるセルは段落単位で分割して翻訳
 SHEET_WORKERS   = 40   # 並列LLMワーカー数 — レートリミッター（40回/分）が実際の制御者
 FILE_WORKERS    = 1    # 複数ファイルの並列処理数
 
@@ -75,6 +76,28 @@ def _get_limiter() -> _RateLimiter:
 
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
+
+def _split_and_translate(text: str, target_language: str, on_retry=None) -> str:
+    """長すぎるセルを段落単位で分割して翻訳し、結合して返す。"""
+    lines = text.split('\n')
+    sub_chunks: list[list[str]] = []
+    cur: list[str] = []
+    cur_len = 0
+    for line in lines:
+        if cur and cur_len + len(line) + 1 > CHUNK_CHAR_MAX:
+            sub_chunks.append(cur)
+            cur, cur_len = [], 0
+        cur.append(line)
+        cur_len += len(line) + 1
+    if cur:
+        sub_chunks.append(cur)
+
+    result_lines: list[str] = []
+    for sub_chunk in sub_chunks:
+        translated = _translate_list(sub_chunk, target_language, on_retry=on_retry)
+        result_lines.extend(translated)
+    return '\n'.join(result_lines)
+
 
 def _estimate_max_tokens(items: list[str]) -> int:
     total_chars = sum(len(s) for s in items)
@@ -261,10 +284,15 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
         if dupes:
             progress(f"  [{sheet_name}] {len(unique_texts)}件ユニーク ({dupes}件重複スキップ)")
 
+        long_texts  = [t for t in unique_texts if len(t) > CELL_SPLIT_THRESHOLD]
+        short_texts = [t for t in unique_texts if len(t) <= CELL_SPLIT_THRESHOLD]
+        if long_texts:
+            progress(f"  [{sheet_name}] 長いテキスト {len(long_texts)}件を段落分割して翻訳")
+
         cache: dict[str, str] = {}
         cache_lock = threading.Lock()
         done       = 0
-        all_chunks   = _smart_chunks([(i, t) for i, t in enumerate(unique_texts)])
+        all_chunks   = _smart_chunks([(i, t) for i, t in enumerate(short_texts)])
         total_chunks = len(all_chunks)
 
         def _translate_worker(chunk: list, idx: int):
@@ -278,7 +306,7 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
                 for (_, orig), new in zip(chunk, translated):
                     cache[orig] = new
                 done += len(chunk)
-                progress(f"[{sheet_name}][{idx}/{total_chunks}] 完了 — {done}/{len(unique_texts)}件翻訳済み")
+                progress(f"[{sheet_name}][{idx}/{total_chunks}] 完了 — {done}/{len(short_texts)}件翻訳済み")
 
         with ThreadPoolExecutor(max_workers=SHEET_WORKERS) as pool:
             futures = {pool.submit(_translate_worker, chunk, i + 1): i for i, chunk in enumerate(all_chunks)}
@@ -287,6 +315,10 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
                     fut.result()
                 except Exception as e:
                     progress(f"ERROR [{sheet_name}] チャンク {futures[fut] + 1}: {e}")
+
+        for text in long_texts:
+            progress(f"  [{sheet_name}] 長文分割翻訳中 ({len(text)}文字)…")
+            cache[text] = _split_and_translate(text, target_language)
 
         # ── 書き戻し ─────────────────────────────────────────────────────────
         write_data = [

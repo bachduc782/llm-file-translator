@@ -318,7 +318,18 @@ def _translate_unique(
             try:
                 fut.result()
             except Exception as e:
-                progress(f"ERROR チャンク {futures[fut] + 1}: {e}")
+                chunk_idx = futures[fut]
+                chunk = all_chunks[chunk_idx]
+                progress(f"ERROR チャンク {chunk_idx + 1}: {e} — 個別リトライ中")
+                with lock:
+                    for _, orig in chunk:
+                        try:
+                            result = _translate_list([orig], target_language)
+                            cache[orig] = result[0] if result else orig
+                        except Exception:
+                            pass
+                    done += len(chunk)
+                    progress(f"個別リトライ完了 チャンク {chunk_idx + 1}")
 
     # 長いテキストは段落単位で分割して翻訳
     for text in long_texts:

@@ -363,7 +363,18 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
                 try:
                     fut.result()
                 except Exception as e:
-                    progress(f"ERROR [{sheet_name}] チャンク {futures[fut] + 1}: {e}")
+                    chunk_idx = futures[fut]
+                    chunk = all_chunks[chunk_idx]
+                    progress(f"ERROR [{sheet_name}] チャンク {chunk_idx + 1}: {e} — 個別リトライ中")
+                    with cache_lock:
+                        for _, orig in chunk:
+                            try:
+                                result = _translate_list([orig], target_language)
+                                cache[orig] = result[0] if result else orig
+                            except Exception:
+                                pass
+                        done += len(chunk)
+                        progress(f"個別リトライ完了 [{sheet_name}] チャンク {chunk_idx + 1}")
 
         for text in long_texts:
             progress(f"  [{sheet_name}] 長文分割翻訳中 ({len(text)}文字)…")

@@ -200,10 +200,8 @@ def _call_llm(prompt: str, retries: int = 3, max_tokens: int = 8192, on_retry=No
         default_headers=cfg.get("headers", {}),
         timeout=90.0,
     )
-    limiter       = _get_limiter()
-    attempt       = 0
-    non_429_fails = 0
-    last_exc: Exception | None = None
+    limiter = _get_limiter()
+    attempt = 0
 
     while True:
         limiter.acquire()
@@ -219,22 +217,16 @@ def _call_llm(prompt: str, retries: int = 3, max_tokens: int = 8192, on_retry=No
                 raw = re.sub(r"\n?```$", "", raw.strip())
             return raw
         except Exception as exc:
-            last_exc = exc
-            is_429   = "429" in str(exc) or "rate" in str(exc).lower()
-            if is_429:
-                wait = min(30 * (attempt + 1), 120)
-                if on_retry:
-                    on_retry(attempt + 1, "∞", exc, wait)
-                time.sleep(wait)
-            else:
-                non_429_fails += 1
-                if non_429_fails >= retries:
-                    raise last_exc  # type: ignore[misc]
-                wait = 2 ** non_429_fails
-                if on_retry:
-                    on_retry(non_429_fails, retries, exc, wait)
-                time.sleep(wait)
             attempt += 1
+            is_429 = "429" in str(exc) or "rate" in str(exc).lower()
+            if is_429:
+                wait = min(30 * attempt, 120)
+            else:
+                # ネットワーク障害など — 成功するまで指数バックオフで無限リトライ
+                wait = min(2 ** attempt, 60)
+            if on_retry:
+                on_retry(attempt, "∞", exc, wait)
+            time.sleep(wait)
 
 
 def _translate_list(items: list[str], target_language: str, on_retry=None, context: str = '') -> list[str]:

@@ -253,38 +253,42 @@ def _translate_xlsx(file_path: str, sheet_name: str, target_language: str, progr
     else:
         ws_list = [wb[sn] for sn in wb.sheetnames]
 
-    all_cells: list[tuple[str, int, int, str]] = []
-    total_raw = 0
+    total_translated = 0
+
     for ws in ws_list:
-        progress(f"スキャン中 [{ws.title}]…")
+        # スキャン
+        progress(f"[{ws.title}] スキャン中…")
+        cells: list[tuple[int, int, str]] = []
+        total_raw = 0
         for row in ws.iter_rows():
             for cell in row:
                 if isinstance(cell.value, str) and cell.value.strip():
                     total_raw += 1
                     if _is_translatable(cell.value):
-                        all_cells.append((ws.title, cell.row, cell.column, cell.value))
+                        cells.append((cell.row, cell.column, cell.value))
 
-    skipped = total_raw - len(all_cells)
-    progress(
-        f"{len(ws_list)}シートで{len(all_cells)}セルを翻訳します"
-        + (f" ({skipped}件スキップ)" if skipped else "")
-    )
-    if not all_cells:
-        return 0
+        skipped = total_raw - len(cells)
+        progress(
+            f"[{ws.title}] {len(cells)}セルを翻訳"
+            + (f" ({skipped}件スキップ)" if skipped else "")
+        )
+        if not cells:
+            continue
 
-    cache = _translate_unique([t for _, _, _, t in all_cells], target_language, progress)
-    translated_map = {
-        (sn, r, c): cache[orig]
-        for sn, r, c, orig in all_cells
-        if cache.get(orig, orig) != orig
-    }
+        # このシート内でdedup → 翻訳
+        cache = _translate_unique([t for _, _, t in cells], target_language, progress)
 
-    for (sn, r, c), new in translated_map.items():
-        wb[sn].cell(row=r, column=c).value = new
+        # 書き戻し
+        for r, c, orig in cells:
+            new = cache.get(orig, orig)
+            if orig != new:
+                ws.cell(row=r, column=c).value = new
+
+        total_translated += len(cells)
 
     progress("ファイルを保存中…")
     wb.save(file_path)
-    return len(all_cells)
+    return total_translated
 
 
 # ── Word (.docx) ───────────────────────────────────────────────────────────────

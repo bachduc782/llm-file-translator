@@ -177,7 +177,7 @@ def _smart_chunks(cells: list[tuple]) -> list[list[tuple]]:
     """アイテム数と文字数の両方を考慮してチャンクを分割する。"""
     chunks, cur, cur_chars = [], [], 0
     for cell in cells:
-        text = cell[3]
+        text = cell[-1]
         if cur and (len(cur) >= TRANSLATE_CHUNK or cur_chars + len(text) > CHUNK_CHAR_MAX):
             chunks.append(cur)
             cur, cur_chars = [], 0
@@ -195,130 +195,117 @@ def _noop(*_): pass
 
 def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress = _noop,
                        sheet_cols: dict | None = None) -> int:
-    # ── フェーズ1：全シートを並列スキャン ────────────────────────────────────
-    all_cells: list[tuple[str, int, int, str]] = []
-    total_raw = 0
-    scan_lock = threading.Lock()
     _cols = sheet_cols or {}
+    total_translated = 0
 
-    def _scan_sheet(sheet_name: str, max_col: int):
-        # httplib2はスレッドセーフではないため、スレッドごとに専用サービスを作成する
-        from src.auth.google_auth import build_sheets_service as _bss
-        _svc = _bss()
-        col_end = _col_letter(max_col - 1)
-        cells, raw = [], 0
+    for sheet_name in sheet_names:
+        max_col   = _cols.get(sheet_name, 52)
+        col_end   = _col_letter(max_col - 1)
+
+        # ── スキャン ─────────────────────────────────────────────────────────
+        progress(f"[{sheet_name}] スキャン中…")
+        cells: list[tuple[int, int, str]] = []
+        total_raw  = 0
         row_offset = 0
-        while True:
-            if row_offset > 0:
-                progress(f"  [{sheet_name}] スキャン中… {row_offset}行目")
-            range_str = f"'{sheet_name}'!A{row_offset + 1}:{col_end}{row_offset + SCAN_ROW_BATCH}"
-            for attempt in range(4):
-                try:
-                    values = _svc.spreadsheets().values().get(
-                        spreadsheetId=sid, range=range_str
-                    ).execute().get("values", [])
+        try:
+            while True:
+                if row_offset > 0:
+                    progress(f"  [{sheet_name}] {row_offset}行目…")
+                range_str = f"'{sheet_name}'!A{row_offset + 1}:{col_end}{row_offset + SCAN_ROW_BATCH}"
+                for attempt in range(4):
+                    try:
+                        values = svc.spreadsheets().values().get(
+                            spreadsheetId=sid, range=range_str
+                        ).execute().get("values", [])
+                        break
+                    except Exception as exc:
+                        if attempt < 3:
+                            time.sleep(2 ** attempt)
+                        else:
+                            raise
+                if not values:
                     break
-                except Exception as exc:
-                    if attempt < 3:
-                        time.sleep(2 ** attempt)
-                    else:
-                        raise
-            if not values:
-                break
-            for r, row in enumerate(values):
-                for c, cell in enumerate(row):
-                    if isinstance(cell, str) and cell.strip():
-                        raw += 1
-                        if _is_translatable(cell):
-                            cells.append((sheet_name, row_offset + r, c, cell))
-            row_offset += SCAN_ROW_BATCH
-            if len(values) < SCAN_ROW_BATCH:
-                break
-        return cells, raw
+                for r, row in enumerate(values):
+                    for c, cell in enumerate(row):
+                        if isinstance(cell, str) and cell.strip():
+                            total_raw += 1
+                            if _is_translatable(cell):
+                                cells.append((row_offset + r, c, cell))
+                row_offset += SCAN_ROW_BATCH
+                if len(values) < SCAN_ROW_BATCH:
+                    break
+        except Exception as e:
+            import traceback as _tb
+            progress(f"  [{sheet_name}] スキャンエラー (スキップ): {e}")
+            progress(f"  [{sheet_name}] {_tb.format_exc().strip()}")
+            continue
 
-    SCAN_WORKERS = min(len(sheet_names), 3)   # 上限3 — 並列TLSハンドシェイクによるSSLエラーを回避
-    progress(f"{len(sheet_names)}シートを並列スキャン中…")
-    with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
-        scan_futures = {pool.submit(_scan_sheet, sn, _cols.get(sn, 52)): sn for sn in sheet_names}
-        for fut in as_completed(scan_futures):
-            sn = scan_futures[fut]
-            try:
-                cells, raw = fut.result()
-                all_cells.extend(cells)
-                total_raw += raw
-                progress(f"  [{sn}] {len(cells)}セル検出")
-            except Exception as e:
-                import traceback as _tb
-                progress(f"  [{sn}] スキャンエラー ({type(e).__name__}) (スキップ): {e}")
-                progress(f"  [{sn}] {_tb.format_exc().strip()}")
+        skipped = total_raw - len(cells)
+        progress(
+            f"[{sheet_name}] {len(cells)}セルを翻訳"
+            + (f" ({skipped}件スキップ)" if skipped else "")
+        )
+        if not cells:
+            continue
 
-    skipped = total_raw - len(all_cells)
-    progress(
-        f"合計: {len(all_cells)}セルを翻訳します"
-        + (f" ({skipped}件スキップ)" if skipped else "")
-    )
+        # ── このシート内でdedup → 翻訳 ───────────────────────────────────────
+        unique_texts = list(dict.fromkeys(t for _, _, t in cells))
+        dupes        = len(cells) - len(unique_texts)
+        if dupes:
+            progress(f"  [{sheet_name}] {len(unique_texts)}件ユニーク ({dupes}件重複スキップ)")
 
-    if not all_cells:
-        return 0
+        cache: dict[str, str] = {}
+        cache_lock = threading.Lock()
+        done       = 0
+        all_chunks   = _smart_chunks([(i, t) for i, t in enumerate(unique_texts)])
+        total_chunks = len(all_chunks)
 
-    # ── フェーズ2：ユニークテキストのみ翻訳 ──────────────────────────────────
-    unique_texts = list(dict.fromkeys(t for _, _, _, t in all_cells))
-    dupes        = len(all_cells) - len(unique_texts)
-    if dupes:
-        progress(f"{len(unique_texts)}件のユニークテキストを翻訳 ({dupes}件重複スキップ)")
+        def _translate_worker(chunk: list, idx: int):
+            nonlocal done
 
-    cache: dict[str, str] = {}
-    cache_lock = threading.Lock()
-    done       = 0
-    all_chunks   = _smart_chunks([(i, t) for i, t in enumerate(unique_texts)])
-    total_chunks = len(all_chunks)
+            def _on_retry(attempt, total, exc, wait):
+                progress(f"リトライ [{sheet_name}][{idx}/{total_chunks}] 試行 {attempt}/{total} (待機 {wait}秒) — {exc}")
 
-    def _translate_worker(chunk: list, idx: int):
-        nonlocal done
-        progress(f"[{idx}/{total_chunks}] LLMを呼び出し中 ({len(chunk)}件)…")
+            translated = _translate_list([t for _, t in chunk], target_language, on_retry=_on_retry)
+            with cache_lock:
+                for (_, orig), new in zip(chunk, translated):
+                    cache[orig] = new
+                done += len(chunk)
+                progress(f"[{sheet_name}][{idx}/{total_chunks}] 完了 — {done}/{len(unique_texts)}件翻訳済み")
 
-        def _on_retry(attempt, total, exc, wait):
-            progress(f"リトライ [{idx}/{total_chunks}] 試行 {attempt}/{total} (待機 {wait}秒) — {exc}")
+        with ThreadPoolExecutor(max_workers=SHEET_WORKERS) as pool:
+            futures = {pool.submit(_translate_worker, chunk, i + 1): i for i, chunk in enumerate(all_chunks)}
+            for fut in as_completed(futures):
+                try:
+                    fut.result()
+                except Exception as e:
+                    progress(f"ERROR [{sheet_name}] チャンク {futures[fut] + 1}: {e}")
 
-        translated = _translate_list([t for _, t in chunk], target_language, on_retry=_on_retry)
-        with cache_lock:
-            for (_, orig), new in zip(chunk, translated):
-                cache[orig] = new
-            done += len(chunk)
-            progress(f"[{idx}/{total_chunks}] 完了 — {done}/{len(unique_texts)}件翻訳済み")
+        # ── 書き戻し ─────────────────────────────────────────────────────────
+        write_data = [
+            {"range": f"'{sheet_name}'!{_col_letter(c)}{r + 1}", "values": [[cache[orig]]]}
+            for r, c, orig in cells
+            if cache.get(orig, orig) != orig
+        ]
+        if write_data:
+            progress(f"[{sheet_name}] {len(write_data)}セルを書き込み中…")
+            for batch in _chunks(write_data, 500):
+                for attempt in range(3):
+                    try:
+                        svc.spreadsheets().values().batchUpdate(
+                            spreadsheetId=sid,
+                            body={"valueInputOption": "RAW", "data": batch},
+                        ).execute()
+                        break
+                    except Exception as e:
+                        if attempt < 2:
+                            time.sleep(2 ** attempt)
+                        else:
+                            progress(f"  [{sheet_name}] 書き込みエラー: {e}")
 
-    with ThreadPoolExecutor(max_workers=SHEET_WORKERS) as pool:
-        futures = {pool.submit(_translate_worker, chunk, i + 1): i for i, chunk in enumerate(all_chunks)}
-        for fut in as_completed(futures):
-            try:
-                fut.result()
-            except Exception as e:
-                progress(f"ERROR チャンク {futures[fut] + 1}: {e}")
+        total_translated += len(cells)
 
-    # ── フェーズ3：一括書き戻し ───────────────────────────────────────────────
-    write_data = [
-        {"range": f"'{sn}'!{_col_letter(c)}{r + 1}", "values": [[cache[orig]]]}
-        for sn, r, c, orig in all_cells
-        if cache.get(orig, orig) != orig
-    ]
-    progress(f"{len(write_data)}セルを書き戻し中…")
-    write_lock = threading.Lock()
-    for batch in _chunks(write_data, 500):
-        for attempt in range(3):
-            try:
-                with write_lock:
-                    svc.spreadsheets().values().batchUpdate(
-                        spreadsheetId=sid,
-                        body={"valueInputOption": "RAW", "data": batch},
-                    ).execute()
-                break
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(2 ** attempt)
-                else:
-                    progress(f"  書き込みエラー: {e}")
-
-    return len(all_cells)
+    return total_translated
 
 
 # ── Docs ──────────────────────────────────────────────────────────────────────

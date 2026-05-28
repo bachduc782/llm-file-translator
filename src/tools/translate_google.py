@@ -439,20 +439,24 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
             progress(f"  [{sheet_name}] 長文分割翻訳中 ({len(text)}文字)…")
             cache[text] = _split_and_translate(text, target_language)
 
-        # ── 書き戻し（混合言語セルは強制再翻訳） ────────────────────────────
+        # ── 強制再翻訳（同一テキスト返却分） ────────────────────────────────
+        retry_texts = {orig for _, _, orig in cells if cache.get(orig, orig) == orig}
+        if retry_texts:
+            progress(f"[{sheet_name}] 同一テキスト返却 {len(retry_texts)}件を強制再翻訳…")
+            for text in retry_texts:
+                forced = _force_translate(text, target_language)
+                if forced != text:
+                    cache[text] = forced
+
+        # ── 書き戻し ─────────────────────────────────────────────────────────
         write_data = []
         unchanged = 0
         for r, c, orig in cells:
             new = cache.get(orig, orig)
             if new != orig:
                 write_data.append({"range": f"'{sheet_name}'!{_col_letter(c)}{r + 1}", "values": [[new]]})
-                continue
-            if _is_mixed_language(orig):
-                forced = _force_translate(orig, target_language)
-                if forced != orig:
-                    write_data.append({"range": f"'{sheet_name}'!{_col_letter(c)}{r + 1}", "values": [[forced]]})
-                    continue
-            unchanged += 1
+            else:
+                unchanged += 1
         if unchanged:
             progress(f"[{sheet_name}] ⚠ {unchanged}件はLLMが同一テキストを返したため未更新")
         if write_data:

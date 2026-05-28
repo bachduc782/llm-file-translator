@@ -31,8 +31,11 @@ def _clone_path(file_path: str, target_language: str) -> str:
 
 def _translate_xlsx(file_path: str, sheet_name: str, target_language: str, progress: Progress) -> int:
     import openpyxl
+    from collections import Counter
 
-    wb = openpyxl.load_workbook(file_path)
+    # data_only=True: 数式セルは計算済みの値として読み込む
+    wb         = openpyxl.load_workbook(file_path, data_only=True)
+    wb_formula = openpyxl.load_workbook(file_path)
 
     if sheet_name:
         if sheet_name not in wb.sheetnames:
@@ -45,13 +48,29 @@ def _translate_xlsx(file_path: str, sheet_name: str, target_language: str, progr
     all_cells: list[tuple[str, int, int, str]] = []
     total_raw = 0
     for ws in ws_list:
+        ws_f = wb_formula[ws.title]
         progress(f"スキャン中 [{ws.title}]…")
+        uncached_formulas = 0
         for row in ws.iter_rows():
             for cell in row:
-                if isinstance(cell.value, str) and cell.value.strip():
-                    total_raw += 1
-                    if _is_translatable(cell.value):
-                        all_cells.append((ws.title, cell.row, cell.column, cell.value))
+                v = cell.value
+                if not isinstance(v, str):
+                    if v is None:
+                        fv = ws_f.cell(cell.row, cell.column).value
+                        if isinstance(fv, str) and fv.startswith("="):
+                            uncached_formulas += 1
+                    continue
+                v = v.strip()
+                if not v:
+                    continue
+                total_raw += 1
+                if _is_translatable(v):
+                    all_cells.append((ws.title, cell.row, cell.column, v))
+        if uncached_formulas:
+            progress(
+                f"[{ws.title}] ⚠ {uncached_formulas}件の数式セルはキャッシュなし"
+                "（Excelで一度開いて保存してください）"
+            )
 
     skipped = total_raw - len(all_cells)
     progress(
@@ -61,28 +80,39 @@ def _translate_xlsx(file_path: str, sheet_name: str, target_language: str, progr
     if not all_cells:
         return 0
 
-    # フェーズ2：翻訳
-    translated_map: dict[tuple[str, int, int], str] = {}
+    # フェーズ2：dedup
+    texts  = [t for _, _, _, t in all_cells]
+    counts = Counter(texts)
+    unique = list(dict.fromkeys(texts))
+    dupes  = len(texts) - len(unique)
+    if dupes:
+        progress(f"{len(unique)}件のユニークテキストを翻訳 ({dupes}件重複スキップ)")
+        for text, cnt in sorted(counts.items(), key=lambda x: -x[1]):
+            if cnt > 1:
+                preview = text[:60].replace("\n", "↵")
+                progress(f"  重複 x{cnt}: {preview}{'…' if len(text) > 60 else ''}")
+
+    # フェーズ3：翻訳（uniqueのみ）
+    cache        : dict[str, str] = {}
     lock         = threading.Lock()
     done         = 0
-    all_chunks   = list(_chunks(all_cells, TRANSLATE_CHUNK))
+    all_chunks   = list(_chunks(list(enumerate(unique)), TRANSLATE_CHUNK))
     total_chunks = len(all_chunks)
 
     def _worker(chunk: list, idx: int):
         nonlocal done
-        progress(f"[{idx}/{total_chunks}] LLMを呼び出し中 ({len(chunk)}セル)…")
+        progress(f"[{idx}/{total_chunks}] LLMを呼び出し中 ({len(chunk)}件)…")
 
         def _on_retry(attempt, total_r, exc, wait):
             progress(f"リトライ [{idx}/{total_chunks}] 試行 {attempt}/{total_r} (待機 {wait}秒) — {exc}")
 
-        texts      = [t for _, _, _, t in chunk]
-        translated = _translate_list(texts, target_language, on_retry=_on_retry)
+        texts_chunk = [t for _, t in chunk]
+        translated  = _translate_list(texts_chunk, target_language, on_retry=_on_retry)
         with lock:
-            for (sn, r, c, orig), new in zip(chunk, translated):
-                if orig != new:
-                    translated_map[(sn, r, c)] = new
+            for (_, orig), new in zip(chunk, translated):
+                cache[orig] = new
             done += len(chunk)
-            progress(f"[{idx}/{total_chunks}] 完了 — {done}/{len(all_cells)}セル翻訳済み")
+            progress(f"[{idx}/{total_chunks}] 完了 — {done}/{len(unique)}件翻訳済み")
 
     with ThreadPoolExecutor(max_workers=LOCAL_WORKERS) as pool:
         futures = {pool.submit(_worker, chunk, i + 1): i for i, chunk in enumerate(all_chunks)}
@@ -92,9 +122,16 @@ def _translate_xlsx(file_path: str, sheet_name: str, target_language: str, progr
             except Exception as e:
                 progress(f"ERROR チャンク {futures[fut] + 1}: {e}")
 
-    # フェーズ3：書き戻し
-    for (sn, r, c), new in translated_map.items():
-        wb[sn].cell(row=r, column=c).value = new
+    # フェーズ4：書き戻し
+    unchanged = 0
+    for sn, r, c, orig in all_cells:
+        new = cache.get(orig, orig)
+        if orig != new:
+            wb[sn].cell(row=r, column=c).value = new
+        else:
+            unchanged += 1
+    if unchanged:
+        progress(f"⚠ {unchanged}件はLLMが同一テキストを返したため未更新")
 
     progress("ファイルを保存中…")
     wb.save(file_path)

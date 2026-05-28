@@ -66,6 +66,9 @@ def _translate_xlsx(file_path: str, sheet_name: str, target_language: str, progr
                 total_raw += 1
                 if _is_translatable(v):
                     all_cells.append((ws.title, cell.row, cell.column, v))
+                else:
+                    preview = v[:50].replace("\n", "↵")
+                    progress(f"  スキップ [{ws.title}] R{cell.row}C{cell.column}: {preview}")
         if uncached_formulas:
             progress(
                 f"[{ws.title}] ⚠ {uncached_formulas}件の数式セルはキャッシュなし"
@@ -130,6 +133,8 @@ def _translate_xlsx(file_path: str, sheet_name: str, target_language: str, progr
             wb[sn].cell(row=r, column=c).value = new
         else:
             unchanged += 1
+            preview = orig[:60].replace("\n", "↵")
+            progress(f"  未翻訳 [{sn}] R{r}C{c}: {preview}{'…' if len(orig) > 60 else ''}")
     if unchanged:
         progress(f"⚠ {unchanged}件はLLMが同一テキストを返したため未更新")
 

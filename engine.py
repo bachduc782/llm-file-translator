@@ -381,6 +381,8 @@ def _translate_xlsx(file_path: str, sheet_name: str, target_language: str, progr
 
     # data_only=True: 数式セルは計算済みの値として読み込む（数式は除去）
     wb = openpyxl.load_workbook(file_path, data_only=True)
+    # 数式判定用: キャッシュなし数式セルを検出するため数式ありでも読み込む
+    wb_formula = openpyxl.load_workbook(file_path)
 
     if sheet_name:
         if sheet_name not in wb.sheetnames:
@@ -392,15 +394,21 @@ def _translate_xlsx(file_path: str, sheet_name: str, target_language: str, progr
     total_translated = 0
 
     for ws in ws_list:
+        ws_f = wb_formula[ws.title]
         # スキャン
         progress(f"[{ws.title}] スキャン中…")
         cells: list[tuple[int, int, str]] = []
         total_raw = 0
+        uncached_formulas = 0
         for row in ws.iter_rows():
             for cell in row:
                 v = cell.value
-                # 数値・日付などは文字列化しない、文字列のみ対象
                 if not isinstance(v, str):
+                    if v is None:
+                        # data_only で None → 数式セルのキャッシュなしか確認
+                        fv = ws_f.cell(cell.row, cell.column).value
+                        if isinstance(fv, str) and fv.startswith("="):
+                            uncached_formulas += 1
                     continue
                 v = v.strip()
                 if not v:
@@ -408,6 +416,11 @@ def _translate_xlsx(file_path: str, sheet_name: str, target_language: str, progr
                 total_raw += 1
                 if _is_translatable(v):
                     cells.append((cell.row, cell.column, v))
+
+        if uncached_formulas:
+            progress(
+                f"[{ws.title}] ⚠ {uncached_formulas}件の数式セルはキャッシュなし（Excelで一度開いて保存してください）"
+            )
 
         skipped = total_raw - len(cells)
         progress(

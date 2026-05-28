@@ -379,7 +379,8 @@ def _clone_path(file_path: str, target_language: str) -> str:
 def _translate_xlsx(file_path: str, sheet_name: str, target_language: str, progress: Progress) -> int:
     import openpyxl
 
-    wb = openpyxl.load_workbook(file_path)
+    # data_only=True: 数式セルは計算済みの値として読み込む（数式は除去）
+    wb = openpyxl.load_workbook(file_path, data_only=True)
 
     if sheet_name:
         if sheet_name not in wb.sheetnames:
@@ -397,10 +398,16 @@ def _translate_xlsx(file_path: str, sheet_name: str, target_language: str, progr
         total_raw = 0
         for row in ws.iter_rows():
             for cell in row:
-                if isinstance(cell.value, str) and cell.value.strip():
-                    total_raw += 1
-                    if _is_translatable(cell.value):
-                        cells.append((cell.row, cell.column, cell.value))
+                v = cell.value
+                # 数値・日付などは文字列化しない、文字列のみ対象
+                if not isinstance(v, str):
+                    continue
+                v = v.strip()
+                if not v:
+                    continue
+                total_raw += 1
+                if _is_translatable(v):
+                    cells.append((cell.row, cell.column, v))
 
         skipped = total_raw - len(cells)
         progress(

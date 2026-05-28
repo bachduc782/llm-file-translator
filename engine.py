@@ -45,7 +45,7 @@ _RE_SKIP = re.compile(
 
 def _is_translatable(text: str) -> bool:
     t = text.strip()
-    return len(t) > 2 and not t.startswith("=") and not _RE_SKIP.match(t)
+    return bool(t) and not t.startswith("=") and not _RE_SKIP.match(t)
 
 
 def _noop(*_): pass
@@ -440,10 +440,15 @@ def _translate_xlsx(file_path: str, sheet_name: str, target_language: str, progr
         cache = _translate_unique([t for _, _, t in cells], target_language, progress)
 
         # 書き戻し
+        unchanged = 0
         for r, c, orig in cells:
             new = cache.get(orig, orig)
             if orig != new:
                 ws.cell(row=r, column=c).value = new
+            else:
+                unchanged += 1
+        if unchanged:
+            progress(f"[{ws.title}] ⚠ {unchanged}件はLLMが同一テキストを返したため未更新")
 
         total_translated += len(cells)
 

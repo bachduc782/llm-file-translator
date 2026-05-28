@@ -33,7 +33,7 @@ _RE_SKIP = re.compile(
 
 def _is_translatable(text: str) -> bool:
     t = text.strip()
-    return len(t) > 2 and not t.startswith("=") and not _RE_SKIP.match(t)
+    return bool(t) and not t.startswith("=") and not _RE_SKIP.match(t)
 
 
 # ── レートリミッター ──────────────────────────────────────────────────────────
@@ -413,11 +413,16 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
             cache[text] = _split_and_translate(text, target_language)
 
         # ── 書き戻し ─────────────────────────────────────────────────────────
-        write_data = [
-            {"range": f"'{sheet_name}'!{_col_letter(c)}{r + 1}", "values": [[cache[orig]]]}
-            for r, c, orig in cells
-            if cache.get(orig, orig) != orig
-        ]
+        write_data = []
+        unchanged = 0
+        for r, c, orig in cells:
+            new = cache.get(orig, orig)
+            if new != orig:
+                write_data.append({"range": f"'{sheet_name}'!{_col_letter(c)}{r + 1}", "values": [[new]]})
+            else:
+                unchanged += 1
+        if unchanged:
+            progress(f"[{sheet_name}] ⚠ {unchanged}件はLLMが同一テキストを返したため未更新")
         if write_data:
             progress(f"[{sheet_name}] {len(write_data)}セルを書き込み中…")
             for batch in _chunks(write_data, 500):

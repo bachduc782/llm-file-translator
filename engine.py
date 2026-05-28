@@ -309,10 +309,16 @@ def _translate_unique(
     progress: Progress,
 ) -> dict[str, str]:
     """重複を排除してから翻訳し、{原文: 訳文} のキャッシュを返す。"""
+    from collections import Counter
+    counts = Counter(texts)
     unique = list(dict.fromkeys(texts))
     dupes  = len(texts) - len(unique)
     if dupes:
         progress(f"{len(unique)}件のユニークテキストを翻訳 ({dupes}件重複スキップ)")
+        for text, cnt in sorted(counts.items(), key=lambda x: -x[1]):
+            if cnt > 1:
+                preview = text[:60].replace("\n", "↵")
+                progress(f"  重複 x{cnt}: {preview}{'…' if len(text) > 60 else ''}")
 
     # 長すぎるテキストと通常テキストを分ける
     long_texts  = [t for t in unique if len(t) > CELL_SPLIT_THRESHOLD]

@@ -353,10 +353,17 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
             continue
 
         # ── このシート内でdedup → 翻訳 ───────────────────────────────────────
-        unique_texts = list(dict.fromkeys(t for _, _, t in cells))
+        from collections import Counter
+        cell_texts   = [t for _, _, t in cells]
+        counts       = Counter(cell_texts)
+        unique_texts = list(dict.fromkeys(cell_texts))
         dupes        = len(cells) - len(unique_texts)
         if dupes:
             progress(f"  [{sheet_name}] {len(unique_texts)}件ユニーク ({dupes}件重複スキップ)")
+            for text, cnt in sorted(counts.items(), key=lambda x: -x[1]):
+                if cnt > 1:
+                    preview = text[:60].replace("\n", "↵")
+                    progress(f"    重複 x{cnt}: {preview}{'…' if len(text) > 60 else ''}")
 
         long_texts  = [t for t in unique_texts if len(t) > CELL_SPLIT_THRESHOLD]
         short_texts = [t for t in unique_texts if len(t) <= CELL_SPLIT_THRESHOLD]

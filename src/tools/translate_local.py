@@ -8,7 +8,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.tools.translate_google import (
-    _translate_list, _is_translatable, _chunks,
+    _translate_list, _is_translatable, _is_mixed_language, _force_translate, _chunks,
     TRANSLATE_CHUNK, FILE_WORKERS,
     Progress, _noop,
 )
@@ -125,16 +125,24 @@ def _translate_xlsx(file_path: str, sheet_name: str, target_language: str, progr
             except Exception as e:
                 progress(f"ERROR チャンク {futures[fut] + 1}: {e}")
 
-    # フェーズ4：書き戻し
+    # フェーズ4：書き戻し（混合言語セルは強制再翻訳）
     unchanged = 0
     for sn, r, c, orig in all_cells:
         new = cache.get(orig, orig)
         if orig != new:
             wb[sn].cell(row=r, column=c).value = new
-        else:
-            unchanged += 1
-            preview = orig[:60].replace("\n", "↵")
-            progress(f"  未翻訳 [{sn}] R{r}C{c}: {preview}{'…' if len(orig) > 60 else ''}")
+            continue
+
+        # LLMが同一テキストを返した場合、混合言語セルなら強制再翻訳
+        if _is_mixed_language(orig):
+            forced = _force_translate(orig, target_language)
+            if forced != orig:
+                wb[sn].cell(row=r, column=c).value = forced
+                continue
+
+        unchanged += 1
+        preview = orig[:60].replace("\n", "↵")
+        progress(f"  未翻訳 [{sn}] R{r}C{c}: {preview}{'…' if len(orig) > 60 else ''}")
     if unchanged:
         progress(f"⚠ {unchanged}件はLLMが同一テキストを返したため未更新")
 

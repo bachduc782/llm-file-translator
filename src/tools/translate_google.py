@@ -188,6 +188,25 @@ def _call_llm(prompt: str, retries: int = 3, max_tokens: int = 8192, on_retry=No
             time.sleep(wait)
 
 
+def _is_mixed_language(text: str) -> bool:
+    """Returns True if text contains non-ASCII Latin chars (e.g. Vietnamese diacritics)
+    that are NOT CJK — indicating content that likely needs translation to Japanese."""
+    return any(ch.isalpha() and 0x7F < ord(ch) < 0x3000 for ch in text)
+
+
+def _force_translate(text: str, target_language: str, on_retry=None) -> str:
+    """Ultra-direct single-shot prompt for mixed-language cells that LLM returned unchanged."""
+    prompt = (
+        f"The following text contains non-{target_language} language mixed in.\n"
+        f"Translate ALL non-{target_language} portions to {target_language}.\n"
+        f"Keep {target_language} text and technical tokens (URLs, file paths, identifiers) as-is.\n"
+        "Output ONLY the result, no explanation.\n\n"
+        f"{text}"
+    )
+    result = _call_llm(prompt, max_tokens=_estimate_max_tokens([text]), on_retry=on_retry)
+    return result.strip() if result.strip() else text
+
+
 def _translate_single(text: str, target_language: str, on_retry=None) -> str:
     """JSONを使わずに1テキストを翻訳する（JSON失敗時のフォールバック）。"""
     prompt = (
@@ -420,15 +439,20 @@ def _translate_sheets(svc, sid, sheet_names, target_language, progress: Progress
             progress(f"  [{sheet_name}] 長文分割翻訳中 ({len(text)}文字)…")
             cache[text] = _split_and_translate(text, target_language)
 
-        # ── 書き戻し ─────────────────────────────────────────────────────────
+        # ── 書き戻し（混合言語セルは強制再翻訳） ────────────────────────────
         write_data = []
         unchanged = 0
         for r, c, orig in cells:
             new = cache.get(orig, orig)
             if new != orig:
                 write_data.append({"range": f"'{sheet_name}'!{_col_letter(c)}{r + 1}", "values": [[new]]})
-            else:
-                unchanged += 1
+                continue
+            if _is_mixed_language(orig):
+                forced = _force_translate(orig, target_language)
+                if forced != orig:
+                    write_data.append({"range": f"'{sheet_name}'!{_col_letter(c)}{r + 1}", "values": [[forced]]})
+                    continue
+            unchanged += 1
         if unchanged:
             progress(f"[{sheet_name}] ⚠ {unchanged}件はLLMが同一テキストを返したため未更新")
         if write_data:

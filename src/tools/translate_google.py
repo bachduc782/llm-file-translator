@@ -197,9 +197,8 @@ def _is_mixed_language(text: str) -> bool:
 def _force_translate(text: str, target_language: str, on_retry=None) -> str:
     """Ultra-direct single-shot prompt for mixed-language cells that LLM returned unchanged."""
     prompt = (
-        f"The following text contains non-{target_language} language mixed in.\n"
-        f"Translate ALL non-{target_language} portions to {target_language}.\n"
-        f"Keep {target_language} text and technical tokens (URLs, file paths, identifiers) as-is.\n"
+        f"Translate the following text to {target_language}.\n"
+        f"You MUST translate all natural language content to {target_language}, without exception.\n"
         "Output ONLY the result, no explanation.\n\n"
         f"{text}"
     )
@@ -211,15 +210,11 @@ def _translate_single(text: str, target_language: str, on_retry=None) -> str:
     """JSONを使わずに1テキストを翻訳する（JSON失敗時のフォールバック）。"""
     prompt = (
         f"Translate the following text to {target_language}.\n"
-        "Rules:\n"
-        "- Translate ALL natural language text, including single words and short phrases.\n"
-        "- If the text contains multiple languages (e.g. Vietnamese mixed with Japanese),"
-        f" translate ALL non-{target_language} portions to {target_language}.\n"
-        "- KEEP AS-IS only content that is entirely non-natural-language: URLs, file paths,"
-        " email addresses, usernames, numbers only, and technical tokens"
+        f"You MUST translate all natural language content to {target_language}.\n"
+        "KEEP AS-IS only content that is entirely non-natural-language: URLs, file paths,"
+        " email addresses, usernames, pure numbers, and technical tokens"
         " (identifiers with underscores, camelCase, version strings like v1.0,"
         " or mixed letter-digit patterns like ABC123).\n"
-        "- If the text is already entirely in the target language, keep it as-is.\n"
         "Output ONLY the translated text, no explanation.\n\n"
         f"{text}"
     )
@@ -257,17 +252,13 @@ def _translate_list(items: list[str], target_language: str, on_retry=None, conte
     prompt = (
         f"{context_hint}"
         f"Translate the following list of text items to {target_language}.\n"
-        "Rules:\n"
-        "- Translate ALL natural language text, including single words and short phrases.\n"
-        "- If an item contains text in MULTIPLE languages (e.g. Vietnamese mixed with Japanese),"
-        f" translate ALL non-{target_language} portions to {target_language}. Do NOT keep such items as-is.\n"
-        "- KEEP AS-IS only items that are ENTIRELY non-natural-language: URLs, file paths,"
-        " email addresses, usernames (e.g. firstname.lastname), numbers only,"
+        f"You MUST translate every item that contains natural language to {target_language}.\n"
+        "KEEP AS-IS only items that are ENTIRELY non-natural-language: URLs, file paths,"
+        " email addresses, usernames (e.g. firstname.lastname), pure numbers,"
         " and technical tokens (identifiers with underscores, camelCase, version strings like v1.0,"
         " or mixed letter-digit patterns like ABC123).\n"
-        "- If an item is already entirely in the target language, keep it as-is.\n"
-        "- Preserve EXACT list length — one output per input.\n"
-        "- Return ONLY valid JSON array of strings, no explanation, no markdown.\n\n"
+        "Preserve EXACT list length — one output per input.\n"
+        "Return ONLY valid JSON array of strings, no explanation, no markdown.\n\n"
         f"Input:\n{json.dumps(items, ensure_ascii=False)}"
     )
 

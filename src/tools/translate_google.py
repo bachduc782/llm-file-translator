@@ -23,6 +23,19 @@ FILE_WORKERS    = 1    # 複数ファイルの並列処理数
 Progress = Callable[[str], None]
 
 # このパターンに一致するセルは翻訳不要
+_RE_CONVERSATIONAL = re.compile(
+    r'^(could you|please (provide|give|send|share)|what (text|would you)|'
+    r'i need|i\'d (be happy|like)|sure[,!]|of course|i can help|'
+    r'it (seems|looks|appears)|sorry|i (don\'t|cannot|can\'t|do not))',
+    re.IGNORECASE,
+)
+
+
+def _is_conversational(result: str) -> bool:
+    s = result.strip()
+    return bool(_RE_CONVERSATIONAL.match(s)) or (s.endswith("?") and len(s) < 200)
+
+
 _RE_SKIP = re.compile(
     r'^[\d\s,.\-+%/()\[\]{}:;*|]+$'   # 数字・記号のみ
     r'|^https?://'                      # URL
@@ -149,7 +162,8 @@ def _estimate_max_tokens(items: list[str]) -> int:
     return max(4096, min(estimated, 32768))
 
 
-def _call_llm(prompt: str, retries: int = 3, max_tokens: int = 8192, on_retry=None) -> str:
+def _call_llm(prompt: str, retries: int = 3, max_tokens: int = 8192, on_retry=None,
+              system_prompt: str = "") -> str:
     from openai import OpenAI
 
     cfg    = config.get_llm_config()
@@ -162,12 +176,17 @@ def _call_llm(prompt: str, retries: int = 3, max_tokens: int = 8192, on_retry=No
     limiter = _get_limiter()
     attempt = 0
 
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
     while True:
         limiter.acquire()
         try:
             resp = client.chat.completions.create(
                 model=cfg["model"],
-                messages=[{"role": "user", "content": prompt}],
+                messages=messages,
                 max_tokens=max_tokens,
             )
             raw = (resp.choices[0].message.content or "").strip()
@@ -196,30 +215,30 @@ def _is_mixed_language(text: str) -> bool:
 
 def _force_translate(text: str, target_language: str, on_retry=None) -> str:
     """Ultra-direct single-shot prompt for mixed-language cells that LLM returned unchanged."""
-    prompt = (
-        f"Translate the following text to {target_language}.\n"
-        f"You MUST translate all natural language content to {target_language}, without exception.\n"
-        "Output ONLY the result, no explanation.\n\n"
-        f"{text}"
+    system = (
+        f"You are a translation engine. Translate the user's text to {target_language}. "
+        "Output ONLY the translated text, no explanation."
     )
-    result = _call_llm(prompt, max_tokens=_estimate_max_tokens([text]), on_retry=on_retry)
-    return result.strip() if result.strip() else text
+    result = _call_llm(text, max_tokens=_estimate_max_tokens([text]),
+                       on_retry=on_retry, system_prompt=system)
+    r = result.strip()
+    return r if r and not _is_conversational(r) else text
 
 
 def _translate_single(text: str, target_language: str, on_retry=None) -> str:
     """JSONを使わずに1テキストを翻訳する（JSON失敗時のフォールバック）。"""
-    prompt = (
-        f"Translate the following text to {target_language}.\n"
-        f"You MUST translate all natural language content to {target_language}.\n"
-        "KEEP AS-IS only content that is entirely non-natural-language: URLs, file paths,"
-        " email addresses, usernames, pure numbers, and technical tokens"
-        " (identifiers with underscores, camelCase, version strings like v1.0,"
-        " or mixed letter-digit patterns like ABC123).\n"
-        "Output ONLY the translated text, no explanation.\n\n"
-        f"{text}"
+    system = (
+        f"You are a translation engine. Translate the user's text to {target_language}. "
+        "KEEP AS-IS only content that is entirely non-natural-language: URLs, file paths, "
+        "email addresses, usernames, pure numbers, and technical tokens "
+        "(identifiers with underscores, camelCase, version strings like v1.0, "
+        "or mixed letter-digit patterns like ABC123). "
+        "Output ONLY the translated text, no explanation."
     )
-    result = _call_llm(prompt, max_tokens=_estimate_max_tokens([text]), on_retry=on_retry)
-    return result if result.strip() else text
+    result = _call_llm(text, max_tokens=_estimate_max_tokens([text]),
+                       on_retry=on_retry, system_prompt=system)
+    r = result.strip()
+    return r if r and not _is_conversational(r) else text
 
 
 def _parse_llm_list(raw: str, items: list[str]) -> list[str] | None:
@@ -245,25 +264,23 @@ def _parse_llm_list(raw: str, items: list[str]) -> list[str] | None:
 
 def _translate_list(items: list[str], target_language: str, on_retry=None, context: str = '') -> list[str]:
     max_tokens = _estimate_max_tokens(items)
+    system = (
+        f"You are a translation engine. Translate every item in the JSON array the user provides to {target_language}. "
+        "KEEP AS-IS only items that are ENTIRELY non-natural-language: URLs, file paths, "
+        "email addresses, usernames (e.g. firstname.lastname), pure numbers, "
+        "and technical tokens (identifiers with underscores, camelCase, version strings like v1.0, "
+        "or mixed letter-digit patterns like ABC123). "
+        "Preserve EXACT list length — one output per input. "
+        "Return ONLY a valid JSON array of strings, no explanation, no markdown."
+    )
     context_hint = (
-        f"[Preceding context for reference only — do not translate this line: ...{context}]\n\n"
+        f"[Preceding context for reference only: ...{context}]\n\n"
         if context else ''
     )
-    prompt = (
-        f"{context_hint}"
-        f"Translate the following list of text items to {target_language}.\n"
-        f"You MUST translate every item that contains natural language to {target_language}.\n"
-        "KEEP AS-IS only items that are ENTIRELY non-natural-language: URLs, file paths,"
-        " email addresses, usernames (e.g. firstname.lastname), pure numbers,"
-        " and technical tokens (identifiers with underscores, camelCase, version strings like v1.0,"
-        " or mixed letter-digit patterns like ABC123).\n"
-        "Preserve EXACT list length — one output per input.\n"
-        "Return ONLY valid JSON array of strings, no explanation, no markdown.\n\n"
-        f"Input:\n{json.dumps(items, ensure_ascii=False)}"
-    )
+    user_msg = f"{context_hint}{json.dumps(items, ensure_ascii=False)}"
 
     for fmt_attempt in range(3):
-        raw = _call_llm(prompt, max_tokens=max_tokens, on_retry=on_retry)
+        raw = _call_llm(user_msg, max_tokens=max_tokens, on_retry=on_retry, system_prompt=system)
         result = _parse_llm_list(raw, items)
         if result is not None:
             return result

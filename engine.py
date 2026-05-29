@@ -190,7 +190,8 @@ def _estimate_max_tokens(items: list[str]) -> int:
     return max(4096, min(estimated, 32768))
 
 
-def _call_llm(prompt: str, retries: int = 3, max_tokens: int = 8192, on_retry=None) -> str:
+def _call_llm(prompt: str, retries: int = 3, max_tokens: int = 8192, on_retry=None,
+              system_prompt: str = "") -> str:
     from openai import OpenAI
 
     cfg    = app_config.get_llm_config()
@@ -203,12 +204,17 @@ def _call_llm(prompt: str, retries: int = 3, max_tokens: int = 8192, on_retry=No
     limiter = _get_limiter()
     attempt = 0
 
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
     while True:
         limiter.acquire()
         try:
             resp = client.chat.completions.create(
                 model=cfg["model"],
-                messages=[{"role": "user", "content": prompt}],
+                messages=messages,
                 max_tokens=max_tokens,
             )
             raw = (resp.choices[0].message.content or "").strip()
@@ -231,17 +237,15 @@ def _call_llm(prompt: str, retries: int = 3, max_tokens: int = 8192, on_retry=No
 
 def _translate_single(text: str, target_language: str, on_retry=None) -> str:
     """JSONを使わずに1テキストを翻訳する（JSON失敗時のフォールバック）。"""
-    prompt = (
-        f"Translate the following text to {target_language}.\n"
-        "Rules:\n"
-        "- Translate ALL natural language text, including single words and short phrases.\n"
-        "- KEEP AS-IS only items that are NOT natural language: URLs, email addresses, numbers,"
-        " and technical tokens (identifiers containing underscores, camelCase, version strings like v1.0,"
-        " or mixed letter-digit patterns like ABC123).\n"
-        "Output ONLY the translated text, no explanation.\n\n"
-        f"{text}"
+    system = (
+        f"You are a translation engine. Translate the user's text to {target_language}. "
+        "KEEP AS-IS only content that is entirely non-natural-language: URLs, email addresses, "
+        "pure numbers, and technical tokens (identifiers with underscores, camelCase, "
+        "version strings like v1.0, or mixed letter-digit patterns like ABC123). "
+        "Output ONLY the translated text, no explanation."
     )
-    result = _call_llm(prompt, max_tokens=_estimate_max_tokens([text]), on_retry=on_retry)
+    result = _call_llm(text, max_tokens=_estimate_max_tokens([text]),
+                       on_retry=on_retry, system_prompt=system)
     return result if result.strip() else text
 
 
@@ -269,25 +273,22 @@ def _parse_llm_list(raw: str, items: list[str]) -> list[str] | None:
 
 def _translate_list(items: list[str], target_language: str, on_retry=None, context: str = '') -> list[str]:
     max_tokens = _estimate_max_tokens(items)
+    system = (
+        f"You are a translation engine. Translate every item in the JSON array the user provides to {target_language}. "
+        "KEEP AS-IS only items that are entirely non-natural-language: URLs, email addresses, "
+        "pure numbers, and technical tokens (identifiers with underscores, camelCase, "
+        "version strings like v1.0, or mixed letter-digit patterns like ABC123). "
+        "Preserve EXACT list length — one output per input. "
+        "Return ONLY a valid JSON array of strings, no explanation, no markdown."
+    )
     context_hint = (
-        f"[Preceding context for reference only — do not translate this line: ...{context}]\n\n"
+        f"[Preceding context for reference only: ...{context}]\n\n"
         if context else ''
     )
-    prompt = (
-        f"{context_hint}"
-        f"Translate the following list of text items to {target_language}.\n"
-        "Rules:\n"
-        "- Translate ALL natural language text, including single words and short phrases.\n"
-        "- KEEP AS-IS only items that are NOT natural language: URLs, email addresses, numbers,"
-        " and technical tokens (identifiers containing underscores, camelCase, version strings like v1.0,"
-        " or mixed letter-digit patterns like ABC123).\n"
-        "- Preserve EXACT list length — one output per input.\n"
-        "- Return ONLY valid JSON array of strings, no explanation, no markdown.\n\n"
-        f"Input:\n{json.dumps(items, ensure_ascii=False)}"
-    )
+    user_msg = f"{context_hint}{json.dumps(items, ensure_ascii=False)}"
 
     for fmt_attempt in range(3):
-        raw = _call_llm(prompt, max_tokens=max_tokens, on_retry=on_retry)
+        raw = _call_llm(user_msg, max_tokens=max_tokens, on_retry=on_retry, system_prompt=system)
         result = _parse_llm_list(raw, items)
         if result is not None:
             return result

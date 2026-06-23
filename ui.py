@@ -6,12 +6,91 @@ import json
 import os
 import sys
 
-from rich.console import Console
-from rich.panel import Panel
-from rich.prompt import Prompt, Confirm
-from rich.table import Table
-from rich.text import Text
-from rich import box
+# ── クラッシュログ ────────────────────────────────────────────────────────────
+# 注意: サードパーティのimport（rich等）より前にクラッシュフックを設置する。
+# import段階で失敗してもログに残り、ウィンドウが無言で閉じるのを防ぐため。
+import sys as _sys, traceback as _traceback, threading as _threading, datetime as _dt
+
+# 実行ごとに日時付きのクラッシュログファイルを用意する（例: crash_20260623_143000.log）。
+# ファイルは「最初に実際の書き込みが発生した時」だけ作成され、無事に終了した
+# 実行では空ファイルを残さない。
+_RUN_TS    = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+_CRASH_LOG = f"logs/crash_{_RUN_TS}.log"
+_crash_header_written = False
+
+def _write_crash(header: str, tb_str: str = ""):
+    global _crash_header_written
+    try:
+        os.makedirs("logs", exist_ok=True)
+        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+            if not _crash_header_written:
+                f.write(f"# crash log — run started {_dt.datetime.now():%Y-%m-%d %H:%M:%S}\n")
+                f.write(f"# Python {_sys.version.split()[0]}  exe={_sys.executable}\n")
+                _crash_header_written = True
+            f.write(f"\n{'='*60}\n[{_dt.datetime.now():%Y-%m-%d %H:%M:%S}] {header}\n")
+            if tb_str:
+                f.write(tb_str)
+    except Exception:
+        pass
+
+_orig_excepthook = _sys.excepthook
+def _excepthook(et, ev, tb):
+    # Ctrl+C はユーザーの中断であり「クラッシュ」ではない。
+    # 恐ろしいトレースバックを残さず、静かに終了する（crash.logを汚さない）。
+    if issubclass(et, KeyboardInterrupt):
+        try:
+            print("\n中断しました (Ctrl+C)。", file=_sys.stderr)
+        except Exception:
+            pass
+        raise SystemExit(130)
+    _write_crash(f"UNHANDLED {et.__name__}: {ev}", "".join(_traceback.format_tb(tb)))
+    _orig_excepthook(et, ev, tb)
+_sys.excepthook = _excepthook
+
+if hasattr(_threading, "excepthook"):
+    def _thread_excepthook(args):
+        if issubclass(args.exc_type, KeyboardInterrupt):
+            return
+        _write_crash(
+            f"THREAD '{getattr(args.thread,'name','?')}' {args.exc_type.__name__}: {args.exc_value}",
+            "".join(_traceback.format_tb(args.exc_traceback)) if args.exc_traceback else "",
+        )
+    _threading.excepthook = _thread_excepthook
+
+# 起動記録は run.bat の launcher.log 側に任せ、crash ログは「実際に問題が
+# 起きたとき」だけ作成する（正常起動で空ファイルを増やさないため）。
+
+# ── Pythonバージョンガード ────────────────────────────────────────────────────
+# このプロジェクトは 3.9+（推奨 3.11）が必要。Python 3.8 だと config.py の
+# `dict[str, str]` などで "'type' object is not subscriptable" となり、
+# ウィンドウが一瞬で閉じる。古い python で起動された場合は明確に知らせる。
+_MIN_PY = (3, 9)
+if _sys.version_info < _MIN_PY:
+    _msg = (
+        f"Python {_sys.version_info.major}.{_sys.version_info.minor} は非対応です。"
+        f"Python {_MIN_PY[0]}.{_MIN_PY[1]}+（推奨 3.11）が必要です。\n"
+        f"使用中のexe: {_sys.executable}\n"
+        f"This project requires Python {_MIN_PY[0]}.{_MIN_PY[1]}+ (3.11 recommended); "
+        f"you are running {_sys.version_info.major}.{_sys.version_info.minor}."
+    )
+    _write_crash(f"PYTHON VERSION TOO OLD: {_sys.version.split()[0]}")
+    print("\n" + "=" * 60 + f"\n  ERROR: {_msg}\n" + "=" * 60, file=_sys.stderr)
+    raise SystemExit(3)
+
+# ── サードパーティのimport ────────────────────────────────────────────────────
+# importに失敗した場合は明示的にログへ記録してから再送出する
+# （上のexcepthookでも捕捉されるが、依存不足を分かりやすく残す）。
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.prompt import Prompt, Confirm
+    from rich.table import Table
+    from rich.text import Text
+    from rich import box
+except Exception as _imp_err:
+    _write_crash(f"IMPORT FAILED: {type(_imp_err).__name__}: {_imp_err}",
+                 _traceback.format_exc())
+    raise
 
 console = Console()
 
@@ -42,39 +121,15 @@ def _patch_ssl():
 
     requests.Session.__init__ = _patched_init
 
-_patch_ssl()
-
-# ── クラッシュログ ────────────────────────────────────────────────────────────
-import sys as _sys, traceback as _traceback, threading as _threading, datetime as _dt
-
-_CRASH_LOG = "logs/crash.log"
-
-def _write_crash(header: str, tb_str: str = ""):
-    try:
-        os.makedirs("logs", exist_ok=True)
-        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
-            f.write(f"\n{'='*60}\n[{_dt.datetime.now():%Y-%m-%d %H:%M:%S}] {header}\n")
-            if tb_str:
-                f.write(tb_str)
-    except Exception:
-        pass
-
-_orig_excepthook = _sys.excepthook
-def _excepthook(et, ev, tb):
-    _write_crash(f"UNHANDLED {et.__name__}: {ev}", "".join(_traceback.format_tb(tb)))
-    _orig_excepthook(et, ev, tb)
-_sys.excepthook = _excepthook
-
-if hasattr(_threading, "excepthook"):
-    def _thread_excepthook(args):
-        _write_crash(
-            f"THREAD '{getattr(args.thread,'name','?')}' {args.exc_type.__name__}: {args.exc_value}",
-            "".join(_traceback.format_tb(args.exc_traceback)) if args.exc_traceback else "",
-        )
-    _threading.excepthook = _thread_excepthook
+# SSLパッチ失敗で起動全体が落ちないよう保護する
+try:
+    _patch_ssl()
+except Exception as _ssl_err:
+    _write_crash(f"_patch_ssl FAILED (continuing): {type(_ssl_err).__name__}: {_ssl_err}",
+                 _traceback.format_exc())
 
 TITLE = "[bold cyan]LLM File Translator[/bold cyan]"
-VERSION = "v2.0"
+VERSION = "v2.1"
 
 
 # ── ユーティリティ ────────────────────────────────────────────────────────────
@@ -260,6 +315,14 @@ def screen_translate():
                 f"[dim]処理時間: {elapsed}[/dim]",
                 title="[bold]結果[/bold]", style="green",
             ))
+    except KeyboardInterrupt:
+        # ユーザーによる中断 — クラッシュ扱いしない
+        elapsed = _fmt_elapsed()
+        try:
+            _log_f.write(f"[{elapsed}] CANCELLED by user (Ctrl+C)\n")
+        except Exception:
+            pass
+        console.print(f"\n[yellow]中断しました (Ctrl+C)。[/yellow] [dim]処理時間: {elapsed}[/dim]")
     except BaseException as e:
         elapsed = _fmt_elapsed()
         tb_str = _tb.format_exc()
@@ -439,6 +502,14 @@ def screen_translate_local():
                 f"[dim]処理時間: {elapsed}[/dim]",
                 title="[bold]結果[/bold]", style="green",
             ))
+    except KeyboardInterrupt:
+        # ユーザーによる中断 — クラッシュ扱いしない
+        elapsed = _fmt_elapsed()
+        try:
+            _log_f2.write(f"[{elapsed}] CANCELLED by user (Ctrl+C)\n")
+        except Exception:
+            pass
+        console.print(f"\n[yellow]中断しました (Ctrl+C)。[/yellow] [dim]処理時間: {elapsed}[/dim]")
     except BaseException as e:
         elapsed = _fmt_elapsed()
         tb_str2 = _tb2.format_exc()
